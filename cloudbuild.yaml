@@ -37,7 +37,6 @@ steps:
       - --platform=managed
       - --region=${_REGION}
       - --allow-unauthenticated
-      - --port=8000
       - --cpu=${_CPU}
       - --memory=${_MEM}
       - --set-env-vars=DATABASE_URL=${_DB_URL},REDIS_URL=${_REDIS_URL},SUPABASE_URL=${_SUPABASE_URL},SUPABASE_SERVICE_ROLE_KEY=${_SUPABASE_KEY},CHROMA_PERSIST_DIR=${_CHROMA_DIR}
