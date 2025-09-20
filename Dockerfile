@@ -1,4 +1,5 @@
 # syntax=docker/dockerfile:1
+
 FROM python:3.11-slim AS base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -15,8 +16,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements (support both poetry and requirements.txt)
-COPY backend/pyproject.toml backend/poetry.lock* ./ 
-COPY backend/requirements.txt ./
+COPY pyproject.toml poetry.lock* ./ 
+COPY requirements.txt ./ 
 
 RUN set -eux; \
     if [ -f requirements.txt ]; then \
@@ -25,13 +26,13 @@ RUN set -eux; \
       pip install poetry && poetry install --no-root --only main; \
     fi
 
-# Copy source
-COPY backend/ ./backend
+# Copy source code
+COPY . .
 
 # Environment
 ENV PORT=8000 \
     HOST=0.0.0.0 \
-    PYTHONPATH=/app/backend
+    PYTHONPATH=/app
 
 EXPOSE 8000
 
