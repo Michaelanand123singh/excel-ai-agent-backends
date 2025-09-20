@@ -30,10 +30,11 @@ RUN set -eux; \
 COPY . .
 
 # Environment
-ENV PORT=8000 \
-    HOST=0.0.0.0 \
+ENV HOST=0.0.0.0 \
     PYTHONPATH=/app
 
-EXPOSE 8000
+# Expose the runtime port (Cloud Run provides $PORT)
+EXPOSE 8080
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Use Cloud Run's $PORT dynamically
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port $PORT"]
