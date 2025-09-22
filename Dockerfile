@@ -37,4 +37,4 @@ ENV HOST=0.0.0.0 \
 EXPOSE 8080
 
 # Use Cloud Run's $PORT dynamically
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port $PORT"]
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080}"]
