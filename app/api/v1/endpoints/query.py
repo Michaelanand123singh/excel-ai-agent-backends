@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import text
@@ -20,6 +20,14 @@ class QueryRequest(BaseModel):
 class PartNumberSearchRequest(BaseModel):
     part_number: str
     file_id: int
+    page: int | None = 1
+    page_size: int | None = 50
+    show_all: bool | None = False
+
+
+class BulkPartSearchRequest(BaseModel):
+    file_id: int
+    part_numbers: list[str]
     page: int | None = 1
     page_size: int | None = 50
     show_all: bool | None = False
@@ -235,6 +243,200 @@ async def search_part_number(req: PartNumberSearchRequest, db: Session = Depends
             detail=f"Search failed: {str(e)}"
         )
 
+
+@router.post("/search-part-bulk")
+async def search_part_number_bulk(req: BulkPartSearchRequest, db: Session = Depends(get_db), user=Depends(get_current_user)) -> dict:
+    """Bulk search for multiple part numbers in a dataset.
+
+    Returns a mapping from part_number -> result payload used in single search.
+    """
+    import time, json
+    start_time = time.perf_counter()
+
+    if not req.part_numbers:
+        return {"results": {}, "total_parts": 0, "latency_ms": 0}
+
+    # Normalize and de-dup small list first
+    normalized = []
+    seen = set()
+    for pn in req.part_numbers:
+        v = (pn or "").strip()
+        if len(v) >= 2 and v.lower() not in seen:
+            seen.add(v.lower())
+            normalized.append(v)
+
+    if not normalized:
+        return {"results": {}, "total_parts": 0, "latency_ms": int((time.perf_counter() - start_time) * 1000)}
+
+    # Reuse the single-search path logic by calling the SQL once per part.
+    # This keeps implementation simple and leverages existing caching.
+    results: dict[str, dict] = {}
+    page = req.page or 1
+    page_size = req.page_size or 50
+    show_all = bool(req.show_all)
+
+    # Verify dataset exists once up-front
+    table_name = f"ds_{req.file_id}"
+    exists = db.execute(text(
+        f"""
+        SELECT EXISTS (
+            SELECT FROM information_schema.tables 
+            WHERE table_name = '{table_name}'
+        );
+        """
+    )).scalar()
+    if not exists:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Dataset {req.file_id} not found or not processed yet")
+
+    cache = get_redis_client()
+    for pn in normalized:
+        cache_key = f"search:{req.file_id}:{pn.lower()}:p{page}:s{page_size}:a{1 if show_all else 0}"
+        cached = cache.get(cache_key)
+        if cached:
+            try:
+                results[pn] = json.loads(cached)
+                results[pn]["cached"] = True
+                continue
+            except Exception:
+                pass
+
+        # Build SQL same as single endpoint
+        search_conditions = [
+            "LOWER(\"part_number\") = LOWER(:exact)",
+            "CAST(\"Item_Description\" AS TEXT) ILIKE :pattern",
+            "REPLACE(LOWER(CAST(\"Item_Description\" AS TEXT)), ' ', '') LIKE REPLACE(LOWER(:pattern), ' ', '')",
+        ]
+        search_sql = f"""
+            SELECT 
+                "Potential Buyer 1" as company_name,
+                "Potential Buyer 1 Contact Details" as contact_details,
+                "Potential Buyer 1 email id" as email,
+                "Quantity",
+                "Unit_Price",
+                "Item_Description",
+                "part_number",
+                "UQC",
+                "Potential Buyer 2" as secondary_buyer
+            FROM {table_name} 
+            WHERE {' OR '.join(search_conditions)}
+            ORDER BY "Unit_Price" ASC
+        """
+        stats_sql = f"""
+            SELECT 
+                COUNT(*) as total_matches,
+                MIN("Unit_Price") as min_price,
+                MAX("Unit_Price") as max_price,
+                SUM("Quantity") as total_quantity
+            FROM {table_name} 
+            WHERE {' OR '.join(search_conditions)}
+        """
+
+        pattern = f"%{pn}%"
+        size = max(1, min(2000, int(page_size)))
+        if show_all:
+            params = {"pattern": pattern, "exact": pn, "limit": 100000, "offset": 0}
+            paged_sql = search_sql + "\nLIMIT :limit OFFSET :offset"
+        else:
+            offset = (max(1, int(page)) - 1) * size
+            paged_sql = search_sql + "\nLIMIT :limit OFFSET :offset"
+            params = {"pattern": pattern, "exact": pn, "limit": size, "offset": offset}
+
+        try:
+            rows = db.execute(text(paged_sql), params).fetchall()
+            stats = db.execute(text(stats_sql), {"pattern": pattern, "exact": pn}).fetchone()
+        except Exception as e:
+            results[pn] = {"error": f"Search failed: {e}"}
+            continue
+
+        companies = []
+        for row in rows:
+            companies.append({
+                "company_name": row[0] or "N/A",
+                "contact_details": row[1] or "N/A",
+                "email": row[2] or "N/A",
+                "quantity": int(row[3]) if row[3] is not None else 0,
+                "unit_price": float(row[4]) if row[4] is not None else 0.0,
+                "item_description": row[5] or "N/A",
+                "part_number": row[6] or "N/A",
+                "uqc": row[7] or "N/A",
+                "secondary_buyer": row[8] or "N/A",
+            })
+
+        total_count = stats[0] if stats else 0
+        min_price = float(stats[1]) if stats and stats[1] is not None else 0.0
+        max_price = float(stats[2]) if stats and stats[2] is not None else 0.0
+        total_quantity = int(stats[3]) if stats and stats[3] is not None else 0
+        total_pages = 1 if show_all else int((total_count + size - 1) // size) if size > 0 else 1
+
+        payload = {
+            "part_number": pn,
+            "total_matches": total_count,
+            "companies": companies,
+            "price_summary": {
+                "min_price": min_price,
+                "max_price": max_price,
+                "total_quantity": total_quantity,
+            },
+            "page": page,
+            "page_size": size,
+            "total_pages": total_pages,
+            "show_all": show_all,
+        }
+        results[pn] = payload
+        # cache ~5 minutes
+        try:
+            cache.setex(cache_key, 300, json.dumps(payload))
+        except Exception:
+            pass
+
+    return {
+        "results": results,
+        "total_parts": len(results),
+        "latency_ms": int((time.perf_counter() - start_time) * 1000),
+        "file_id": req.file_id,
+    }
+
+
+@router.post("/search-part-bulk-upload")
+async def search_part_number_bulk_upload(file_id: int = Form(...), file: UploadFile = File(...), db: Session = Depends(get_db), user=Depends(get_current_user)) -> dict:
+    """Accept an Excel/CSV file containing a column of part numbers and perform bulk search.
+
+    Extraction strategy:
+    - If a column named 'part_number' (case-insensitive) exists, use it
+    - Otherwise use the first non-empty column
+    - Limit to first 10,000 entries to protect the service
+    """
+    import io
+    import pandas as pd
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Empty file uploaded")
+
+    try:
+        name = (file.filename or "").lower()
+        df = None
+        bio = io.BytesIO(content)
+        if name.endswith(".csv"):
+            df = pd.read_csv(bio)
+        else:
+            # xlsx/xls
+            df = pd.read_excel(bio, engine="openpyxl")
+        if df is None or df.empty:
+            return {"results": {}, "total_parts": 0}
+
+        # Pick part number column
+        cols_lower = {c.lower(): c for c in df.columns}
+        chosen = cols_lower.get("part_number") or cols_lower.get("part no") or list(cols_lower.values())[0]
+        parts = [str(v).strip() for v in df[chosen].astype(str).tolist() if str(v).strip() and str(v).strip().lower() != "nan"]
+        # Cap to 10k
+        parts = parts[:10000]
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to parse file: {e}")
+
+    # Reuse bulk API path
+    payload = BulkPartSearchRequest(file_id=file_id, part_numbers=parts, page=1, page_size=50, show_all=False)
+    return await search_part_number_bulk(payload, db, user)
 
 @router.get("/test-search/{file_id}")
 async def test_search_endpoint(file_id: int, db: Session = Depends(get_db), user=Depends(get_current_user)) -> dict:
