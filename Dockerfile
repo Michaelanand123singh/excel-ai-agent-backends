@@ -29,6 +29,9 @@ RUN set -eux; \
 # Copy source code
 COPY . .
 
+# Make startup script executable
+RUN chmod +x start.sh
+
 # Environment
 ENV HOST=0.0.0.0 \
     PYTHONPATH=/app
@@ -36,5 +39,5 @@ ENV HOST=0.0.0.0 \
 # Expose the runtime port (Cloud Run provides $PORT)
 EXPOSE 8080
 
-# Use Cloud Run's $PORT dynamically
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080}"]
+# Use startup script for better debugging
+CMD ["./start.sh"]

@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     ENV: str = os.getenv("ENV", "development")
     DEBUG: bool = os.getenv("DEBUG", "True").lower() == "true"
     HOST: str = "0.0.0.0"
-    PORT: int = int(os.getenv("PORT", 8000))  # Cloud Run provides PORT=8080
+    PORT: int = int(os.getenv("PORT", "8080"))  # Cloud Run provides PORT=8080
 
     # Database / Supabase
     DATABASE_URL: Optional[str] = None  # e.g. postgresql+psycopg://user:pass@host:5432/db
