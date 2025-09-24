@@ -208,7 +208,9 @@ async def search_part_number(req: PartNumberSearchRequest, db: Session = Depends
                     "Item_Description",
                     "part_number",
                     "UQC",
-                    "Potential Buyer 2" as secondary_buyer
+                    "Potential Buyer 2" as secondary_buyer,
+                    "Potential Buyer 2 Contact Details" as secondary_buyer_contact,
+                    "Potential Buyer 2 email id" as secondary_buyer_email
                 FROM {table_name} 
                 WHERE {where_sql}
             """
@@ -275,6 +277,8 @@ async def search_part_number(req: PartNumberSearchRequest, db: Session = Depends
                             "part_number": row[6] or "N/A",
                             "uqc": row[7] or "N/A",
                             "secondary_buyer": row[8] or "N/A",
+                            "secondary_buyer_contact": row[9] or "N/A",
+                            "secondary_buyer_email": row[10] or "N/A",
                         })
                     break
             except Exception as e:  # pragma: no cover
@@ -294,7 +298,8 @@ async def search_part_number(req: PartNumberSearchRequest, db: Session = Depends
                 rows = db.execute(text(f"""
                     SELECT 
                         "Potential Buyer 1", "Potential Buyer 1 Contact Details", "Potential Buyer 1 email id",
-                        "Quantity", "Unit_Price", "Item_Description", "part_number", "UQC", "Potential Buyer 2"
+                        "Quantity", "Unit_Price", "Item_Description", "part_number", "UQC", "Potential Buyer 2",
+                        "Potential Buyer 2 Contact Details", "Potential Buyer 2 email id"
                     FROM {table_name}
                     WHERE {where}
                     LIMIT :lim
@@ -342,6 +347,8 @@ async def search_part_number(req: PartNumberSearchRequest, db: Session = Depends
                         "part_number": r[6] or "N/A",
                         "uqc": r[7] or "N/A",
                         "secondary_buyer": r[8] or "N/A",
+                        "secondary_buyer_contact": r[9] or "N/A",
+                        "secondary_buyer_email": r[10] or "N/A",
                     })
                 used_match_type = "fuzzy_python"
         
@@ -512,49 +519,6 @@ async def search_part_number_bulk_upload(file_id: int = Form(...), file: UploadF
     payload = BulkPartSearchRequest(file_id=file_id, part_numbers=parts, page=1, page_size=50, show_all=False)
     return await search_part_number_bulk(payload, db, user)
 
-@router.get("/test-search/{file_id}")
-async def test_search_endpoint(file_id: int, db: Session = Depends(get_db), user=Depends(get_current_user)) -> dict:
-    """Test endpoint to verify search functionality."""
-    try:
-        table_name = f"ds_{file_id}"
-        
-        # Check if table exists
-        result = db.execute(text(f"""
-            SELECT EXISTS (
-                SELECT FROM information_schema.tables 
-                WHERE table_name = '{table_name}'
-            );
-        """))
-        table_exists = result.scalar()
-        
-        if not table_exists:
-            return {
-                "status": "error",
-                "message": f"Table {table_name} does not exist",
-                "table_exists": False
-            }
-        
-        # Get table info
-        columns_result = db.execute(text(f"SELECT column_name, data_type FROM information_schema.columns WHERE table_name = '{table_name}' ORDER BY ordinal_position"))
-        columns_info = columns_result.fetchall()
-        
-        # Get row count
-        count_result = db.execute(text(f"SELECT COUNT(*) FROM {table_name}"))
-        row_count = count_result.scalar()
-        
-        return {
-            "status": "success",
-            "table_name": table_name,
-            "table_exists": True,
-            "row_count": row_count,
-            "columns": [{"name": col[0], "type": col[1]} for col in columns_info]
-        }
-        
-    except Exception as e:
-        return {
-            "status": "error",
-            "message": str(e),
-            "table_exists": False
-        }
+# Removed test-search endpoint used for frontend debug
 
 
