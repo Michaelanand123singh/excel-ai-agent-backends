@@ -49,6 +49,265 @@ async def query(req: QueryRequest, db: Session = Depends(get_db), user=Depends(g
     return answer_question(db, user_id, req.question, req.file_id)
 
 
+@router.post("/search-part")
+async def search_part_number(req: PartNumberSearchRequest, db: Session = Depends(get_db), user=Depends(get_current_user)) -> dict:
+    import time
+    start_time = time.perf_counter()
+    
+    try:
+        table_name = f"ds_{req.file_id}"
+        
+        # Verify dataset exists
+        exists = db.execute(text(
+            f"""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_name = '{table_name}'
+            );
+            """
+        )).scalar()
+        if not exists:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Dataset {req.file_id} not found or not processed yet")
+
+        # Guard small inputs
+        if len((req.part_number or "").strip()) < 2:
+            return {
+                "part_number": req.part_number,
+                "total_matches": 0,
+                "companies": [],
+                "message": "Enter at least 2 characters to search",
+                "cached": False,
+                "latency_ms": int((time.perf_counter() - start_time) * 1000)
+            }
+        
+        # Helpers for SQL expressions
+        def sql_strip_separators(expr: str) -> str:
+            s = expr
+            for sep in PART_NUMBER_CONFIG["separators"]:
+                s = f"REPLACE({s}, '{sep}', '')"
+            return s
+
+        def sql_strip_non_alnum(expr: str) -> str:
+            return f"REGEXP_REPLACE({expr}, '[^a-zA-Z0-9]+', '', 'g')"
+
+        q_original = req.part_number.strip()
+        q_no_seps = normalize(q_original, 2)
+        q_alnum = normalize(q_original, 3)
+
+        search_mode = (req.search_mode or "exact").lower()
+        pn_expr = '"part_number"'
+        item_desc_expr = 'CAST("Item_Description" AS TEXT)'
+
+        exact_conditions = [
+            f"LOWER({pn_expr}) = LOWER(:q_original)",
+            f"LOWER({sql_strip_separators(pn_expr)}) = LOWER(:q_no_seps)",
+            f"LOWER({sql_strip_non_alnum(pn_expr)}) = LOWER(:q_alnum)",
+        ]
+
+        like_conditions = [
+            f"{item_desc_expr} ILIKE :pattern_any",
+            f"LOWER({sql_strip_separators(item_desc_expr)}) LIKE LOWER(:pattern_no_seps)",
+            f"LOWER({sql_strip_non_alnum(item_desc_expr)}) LIKE LOWER(:pattern_alnum)",
+            f"LOWER({sql_strip_separators(pn_expr)}) LIKE LOWER(:pattern_no_seps)",
+            f"LOWER({sql_strip_non_alnum(pn_expr)}) LIKE LOWER(:pattern_alnum)",
+        ]
+
+        fuzzy_conditions = [
+            "similarity(lower(CAST(\"Item_Description\" AS TEXT)), lower(:q_original)) >= :min_sim",
+        ] if PART_NUMBER_CONFIG.get("enable_db_fuzzy", True) else []
+
+        pipelines: list[tuple[str, dict, str]] = []
+        pipelines.append((" OR ".join(exact_conditions), {
+            "q_original": q_original,
+            "q_no_seps": q_no_seps,
+            "q_alnum": q_alnum,
+        }, "exact"))
+
+        if search_mode in ("hybrid", "fuzzy"):
+            pipelines.append((" OR ".join(like_conditions), {
+                "pattern_any": f"%{q_original}%",
+                "pattern_no_seps": f"%{q_no_seps}%",
+                "pattern_alnum": f"%{q_alnum}%",
+            }, "separator_like"))
+            if fuzzy_conditions:
+                pipelines.append((" OR ".join(fuzzy_conditions), {
+                    "q_original": q_original,
+                    "min_sim": PART_NUMBER_CONFIG.get("min_similarity", 0.6),
+                }, "fuzzy_trgm"))
+        
+        def execute_pipeline(where_sql: str, params: dict, match_type: str):
+            base_select = f"""
+                SELECT 
+                    "Potential Buyer 1" as company_name,
+                    "Potential Buyer 1 Contact Details" as contact_details,
+                    "Potential Buyer 1 email id" as email,
+                    "Quantity",
+                    "Unit_Price",
+                    "Item_Description",
+                    "part_number",
+                    "UQC",
+                    "Potential Buyer 2" as secondary_buyer,
+                    "Potential Buyer 2 Contact Details" as secondary_buyer_contact,
+                    "Potential Buyer 2 email id" as secondary_buyer_email
+                FROM {table_name} 
+                WHERE {where_sql}
+            """
+            order_clause = "ORDER BY \"Unit_Price\" ASC"
+            if match_type == "fuzzy_trgm":
+                order_clause = "ORDER BY similarity(lower(CAST(\"Item_Description\" AS TEXT)), lower(:q_original)) DESC, \"Unit_Price\" ASC"
+
+            stats_sql_local = f"""
+                SELECT 
+                    COUNT(*) as total_matches,
+                    MIN("Unit_Price") as min_price,
+                    MAX("Unit_Price") as max_price,
+                    SUM("Quantity") as total_quantity
+                FROM {table_name} 
+                WHERE {where_sql}
+            """
+
+            page = max(1, int(req.page or 1))
+            size = max(1, min(2000, int(req.page_size or 50)))
+            if req.show_all:
+                paged_sql = base_select + f"\n{order_clause}\nLIMIT :limit OFFSET :offset"
+                run_params = {**params, "limit": 100000, "offset": 0}
+            else:
+                offset = (page - 1) * size
+                paged_sql = base_select + f"\n{order_clause}\nLIMIT :limit OFFSET :offset"
+                run_params = {**params, "limit": size, "offset": offset}
+
+            matching_rows = db.execute(text(paged_sql), run_params).fetchall()
+            stats = db.execute(text(stats_sql_local), params).fetchone()
+            return matching_rows, stats, match_type
+        
+        companies = []
+        total_count = 0
+        min_price = 0.0
+        max_price = 0.0
+        total_quantity = 0
+        used_match_type = "none"
+
+        last_exception = None
+        for where_sql, params, match_type in pipelines:
+            try:
+                matching_rows, stats, used_match_type = execute_pipeline(where_sql, params, match_type)
+                if stats and stats[0]:
+                    total_count = stats[0] or 0
+                    min_price = float(stats[1]) if stats[1] is not None else 0.0
+                    max_price = float(stats[2]) if stats[2] is not None else 0.0
+                    total_quantity = int(stats[3]) if stats[3] is not None else 0
+
+                    for row in matching_rows:
+                        companies.append({
+                            "company_name": row[0] or "N/A",
+                            "contact_details": row[1] or "N/A",
+                            "email": row[2] or "N/A",
+                            "quantity": int(row[3]) if row[3] is not None else 0,
+                            "unit_price": float(row[4]) if row[4] is not None else 0.0,
+                            "item_description": row[5] or "N/A",
+                            "part_number": row[6] or "N/A",
+                            "uqc": row[7] or "N/A",
+                            "secondary_buyer": row[8] or "N/A",
+                            "secondary_buyer_contact": row[9] or "N/A",
+                            "secondary_buyer_email": row[10] or "N/A",
+                        })
+                    break
+            except Exception as e:  # pragma: no cover
+                last_exception = e
+                continue
+
+        # Fallback python-side scoring
+        if total_count == 0 and search_mode in ("hybrid", "fuzzy"):
+            tokens = separator_tokenize(q_original)
+            tokens = [t for t in tokens if t]
+            if tokens:
+                clauses = ["CAST(\"Item_Description\" AS TEXT) ILIKE :tok_" + str(i) for i, _ in enumerate(tokens)]
+                where = " OR ".join(clauses)
+                params = {"tok_" + str(i): f"%{t}%" for i, t in enumerate(tokens)}
+                limit = min(1000, PART_NUMBER_CONFIG.get("db_batch_size", 5000))
+                rows = db.execute(text(f"""
+                    SELECT 
+                        "Potential Buyer 1", "Potential Buyer 1 Contact Details", "Potential Buyer 1 email id",
+                        "Quantity", "Unit_Price", "Item_Description", "part_number", "UQC", "Potential Buyer 2",
+                        "Potential Buyer 2 Contact Details", "Potential Buyer 2 email id"
+                    FROM {table_name}
+                    WHERE {where}
+                    LIMIT :lim
+                """), {**params, "lim": limit}).fetchall()
+
+                scored: list[tuple[float, tuple]] = []
+                for r in rows:
+                    pn_val = (r[6] or "")
+                    score = max(
+                        similarity_score(normalize(pn_val, 2).lower(), q_no_seps.lower()),
+                        similarity_score(normalize(pn_val, 3).lower(), q_alnum.lower()),
+                        similarity_score(str(pn_val).lower(), q_original.lower()),
+                    )
+                    if score >= PART_NUMBER_CONFIG.get("min_similarity", 0.6):
+                        scored.append((score, r))
+                scored.sort(key=lambda x: x[0], reverse=True)
+
+                page = max(1, int(req.page or 1))
+                size = max(1, min(2000, int(req.page_size or 50)))
+                total_count = len(scored)
+                min_price = 0.0
+                max_price = 0.0
+                total_quantity = 0
+                start = 0 if req.show_all else (page - 1) * size
+                end = None if req.show_all else start + size
+                for score, r in scored[start:end]:
+                    price = float(r[4]) if r[4] is not None else 0.0
+                    qty = int(r[3]) if r[3] is not None else 0
+                    if min_price == 0.0 or price < min_price:
+                        min_price = price
+                    if price > max_price:
+                        max_price = price
+                    total_quantity += qty
+                    companies.append({
+                        "company_name": r[0] or "N/A",
+                        "contact_details": r[1] or "N/A",
+                        "email": r[2] or "N/A",
+                        "quantity": qty,
+                        "unit_price": price,
+                        "item_description": r[5] or "N/A",
+                        "part_number": r[6] or "N/A",
+                        "uqc": r[7] or "N/A",
+                        "secondary_buyer": r[8] or "N/A",
+                        "secondary_buyer_contact": r[9] or "N/A",
+                        "secondary_buyer_email": r[10] or "N/A",
+                    })
+        
+        size = max(1, min(2000, int(req.page_size or 50)))
+        total_pages = 1 if req.show_all else int((total_count + size - 1) // size) if size > 0 else 1
+
+        result = {
+            "part_number": req.part_number,
+            "total_matches": total_count,
+            "companies": companies,
+            "price_summary": {
+                "min_price": min_price,
+                "max_price": max_price,
+                "total_quantity": total_quantity
+            },
+            "page": int(req.page or 1),
+            "page_size": size,
+            "total_pages": total_pages,
+            "message": f"Found {total_count} companies with part number '{req.part_number}'. Price range: ${min_price:.2f} - ${max_price:.2f}",
+            "cached": False,
+            "latency_ms": int((time.perf_counter() - start_time) * 1000),
+            "table_name": table_name,
+            "show_all": bool(req.show_all),
+            "search_mode": search_mode,
+            "match_type": used_match_type,
+        }
+        return result
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Search failed: {e}")
+
+
 # Removed single part search endpoint; the system uses bulk search exclusively now
 
 
