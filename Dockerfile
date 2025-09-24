@@ -15,8 +15,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements (support both poetry and requirements.txt)
-COPY pyproject.toml poetry.lock* ./ 
 COPY requirements.txt ./ 
 
 RUN set -eux; \
