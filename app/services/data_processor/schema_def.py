@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Dict, List, Any, Tuple
+from app.utils.helpers.part_number import normalize
 
 
 # Canonical header names as confirmed by the user
@@ -65,5 +66,12 @@ def normalize_and_validate_row(row: Dict[str, Any]) -> Dict[str, Any]:
     # Derive part_number from Item_Description
     part = derive_part_number(normalized.get("Item_Description"))
     normalized["part_number"] = part
+    # Precompute normalized variants for large-scale search (optional columns)
+    if part:
+        normalized["part_number_no_separators"] = normalize(part, 2)
+        normalized["part_number_alphanumeric"] = normalize(part, 3)
+    else:
+        normalized["part_number_no_separators"] = None
+        normalized["part_number_alphanumeric"] = None
     return normalized
 

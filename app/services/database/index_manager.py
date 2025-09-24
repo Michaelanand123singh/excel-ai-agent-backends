@@ -22,6 +22,21 @@ def create_search_indexes(db: Session, table_name: str) -> None:
         # Trigram GIN on Item_Description (case-insensitive)
         db.execute(text(f"CREATE INDEX IF NOT EXISTS idx_{table_name}_item_desc_trgm ON {table_name} USING GIN (lower(\"Item_Description\") gin_trgm_ops)"))
 
+        # Optional materialized normalized computed columns via expression indexes
+        # Index for separator-stripped part_number
+        db.execute(text(
+            f"CREATE INDEX IF NOT EXISTS idx_{table_name}_pn_no_seps ON {table_name} (" +
+            "lower(replace(replace(replace(replace(replace(replace(replace(replace(\"part_number\", '-', ''), '/', ''), ',', ''), '*', ''), '&', ''), '~', ''), '.', ''), '%', '')))"
+            ")"
+        ))
+
+        # Index for alphanumeric-only part_number using regexp_replace
+        db.execute(text(
+            f"CREATE INDEX IF NOT EXISTS idx_{table_name}_pn_alnum ON {table_name} (" +
+            "lower(regexp_replace(\"part_number\", '[^a-zA-Z0-9]+', '', 'g'))"
+            ")"
+        ))
+
         db.commit()
         logger.info(f"Created large-scale search indexes for table {table_name}")
     except Exception as e:
