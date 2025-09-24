@@ -83,3 +83,4 @@ class UserService:
         user.is_active = False
         self.db.commit()
         return True
+
