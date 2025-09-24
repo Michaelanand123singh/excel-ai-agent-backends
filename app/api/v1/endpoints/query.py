@@ -136,21 +136,25 @@ async def search_part_number(req: PartNumberSearchRequest, db: Session = Depends
         # Base conditions for exact and like searches
         search_mode = (req.search_mode or "exact").lower()
 
+        # Avoid nested quotes in f-strings by defining SQL expressions once
+        pn_expr = '"part_number"'
+        item_desc_expr = 'CAST("Item_Description" AS TEXT)'
+
         # Stage 1: Multi-format exact matches on part_number and normalized projections
         exact_conditions = [
-            "LOWER(\"part_number\") = LOWER(:q_original)",
-            f"LOWER({sql_strip_separators('"part_number"')}) = LOWER(:q_no_seps)",
-            f"LOWER({sql_strip_non_alnum('"part_number"')}) = LOWER(:q_alnum)",
+            f"LOWER({pn_expr}) = LOWER(:q_original)",
+            f"LOWER({sql_strip_separators(pn_expr)}) = LOWER(:q_no_seps)",
+            f"LOWER({sql_strip_non_alnum(pn_expr)}) = LOWER(:q_alnum)",
         ]
 
         # Stage 2: Description and part_number pattern matches (separator-insensitive)
         like_conditions = [
-            "CAST(\"Item_Description\" AS TEXT) ILIKE :pattern_any",
-            f"LOWER({sql_strip_separators('CAST("Item_Description" AS TEXT)')}) LIKE LOWER(:pattern_no_seps)",
-            f"LOWER({sql_strip_non_alnum('CAST("Item_Description" AS TEXT)')}) LIKE LOWER(:pattern_alnum)",
+            f"{item_desc_expr} ILIKE :pattern_any",
+            f"LOWER({sql_strip_separators(item_desc_expr)}) LIKE LOWER(:pattern_no_seps)",
+            f"LOWER({sql_strip_non_alnum(item_desc_expr)}) LIKE LOWER(:pattern_alnum)",
             # Also allow substring on normalized part_number for cases like ABC123 vs ABC-123
-            f"LOWER({sql_strip_separators('"part_number"')}) LIKE LOWER(:pattern_no_seps)",
-            f"LOWER({sql_strip_non_alnum('"part_number"')}) LIKE LOWER(:pattern_alnum)",
+            f"LOWER({sql_strip_separators(pn_expr)}) LIKE LOWER(:pattern_no_seps)",
+            f"LOWER({sql_strip_non_alnum(pn_expr)}) LIKE LOWER(:pattern_alnum)",
         ]
 
         # Fuzzy optional (Postgres pg_trgm)
