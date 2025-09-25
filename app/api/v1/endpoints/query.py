@@ -136,17 +136,50 @@ async def search_part_number(req: PartNumberSearchRequest, db: Session = Depends
                 }, "fuzzy_trgm"))
         
         def execute_pipeline(where_sql: str, params: dict, match_type: str):
+            # Build dynamic SELECT statement based on available columns
+            def build_select_statement():
+                # Get all available columns
+                all_columns_result = db.execute(text(f"""
+                    SELECT column_name 
+                    FROM information_schema.columns 
+                    WHERE table_name = '{table_name}' 
+                    ORDER BY ordinal_position
+                """)).fetchall()
+                available_columns = [row[0] for row in all_columns_result]
+                
+                # Define column mappings with fallbacks
+                column_mappings = {
+                    'company_name': ['Potential Buyer 1', 'Company Name', 'Buyer 1', 'Company'],
+                    'contact_details': ['Potential Buyer 1 Contact Details', 'Contact Details', 'Contact', 'Phone'],
+                    'email': ['Potential Buyer 1 email id', 'Email', 'Email ID', 'Email Address'],
+                    'quantity': ['Quantity', 'Qty', 'Amount'],
+                    'unit_price': ['Unit_Price', 'Unit Price', 'Price', 'Cost'],
+                    'item_description': ['Item_Description', 'Item Description', 'Description', 'Product'],
+                    'part_number': ['part_number', 'Part Number', 'Part No', 'Part'],
+                    'uqc': ['UQC', 'Unit', 'Unit of Measure'],
+                    'secondary_buyer': ['Potential Buyer 2', 'Buyer 2', 'Secondary Buyer'],
+                    'secondary_buyer_contact': ['Potential Buyer 2 Contact Details', 'Buyer 2 Contact', 'Secondary Contact'],
+                    'secondary_buyer_email': ['Potential Buyer 2 email id', 'Buyer 2 Email', 'Secondary Email']
+                }
+                
+                select_parts = []
+                for alias, possible_columns in column_mappings.items():
+                    found_column = None
+                    for col in possible_columns:
+                        if col in available_columns:
+                            found_column = col
+                            break
+                    
+                    if found_column:
+                        select_parts.append(f'"{found_column}" as {alias}')
+                    else:
+                        # Use NULL for missing columns
+                        select_parts.append(f'NULL as {alias}')
+                
+                return ', '.join(select_parts)
+            
             base_select = f"""
-                SELECT 
-                    "Potential Buyer 1" as company_name,
-                    "Potential Buyer 1 Contact Details" as contact_details,
-                    "Potential Buyer 1 email id" as email,
-                    "Quantity",
-                    "Unit_Price",
-                    "Item_Description",
-                    "part_number",
-                    "UQC",
-                    "Potential Buyer 2" as secondary_buyer
+                SELECT {build_select_statement()}
                 FROM {table_name} 
                 WHERE {where_sql}
             """
@@ -353,6 +386,12 @@ async def search_part_number_bulk(req: BulkPartSearchRequest, db: Session = Depe
     # Execute search per part using inlined single-search logic (copy of previous handler)
     for pn in normalized:
         try:
+            # Reset transaction state before each search to prevent "aborted transaction" errors
+            try:
+                db.rollback()
+            except:
+                pass  # Ignore if no transaction to rollback
+            
             # Quick table existence is already checked
             # Get column names for dynamic search
             columns_result = db.execute(text(f"""
@@ -438,19 +477,50 @@ async def search_part_number_bulk(req: BulkPartSearchRequest, db: Session = Depe
                     }, "fuzzy_trgm"))
 
             def execute_pipeline(where_sql: str, params: dict, match_type: str):
+                # Build dynamic SELECT statement based on available columns
+                def build_select_statement():
+                    # Get all available columns
+                    all_columns_result = db.execute(text(f"""
+                        SELECT column_name 
+                        FROM information_schema.columns 
+                        WHERE table_name = '{table_name}' 
+                        ORDER BY ordinal_position
+                    """)).fetchall()
+                    available_columns = [row[0] for row in all_columns_result]
+                    
+                    # Define column mappings with fallbacks
+                    column_mappings = {
+                        'company_name': ['Potential Buyer 1', 'Company Name', 'Buyer 1', 'Company'],
+                        'contact_details': ['Potential Buyer 1 Contact Details', 'Contact Details', 'Contact', 'Phone'],
+                        'email': ['Potential Buyer 1 email id', 'Email', 'Email ID', 'Email Address'],
+                        'quantity': ['Quantity', 'Qty', 'Amount'],
+                        'unit_price': ['Unit_Price', 'Unit Price', 'Price', 'Cost'],
+                        'item_description': ['Item_Description', 'Item Description', 'Description', 'Product'],
+                        'part_number': ['part_number', 'Part Number', 'Part No', 'Part'],
+                        'uqc': ['UQC', 'Unit', 'Unit of Measure'],
+                        'secondary_buyer': ['Potential Buyer 2', 'Buyer 2', 'Secondary Buyer'],
+                        'secondary_buyer_contact': ['Potential Buyer 2 Contact Details', 'Buyer 2 Contact', 'Secondary Contact'],
+                        'secondary_buyer_email': ['Potential Buyer 2 email id', 'Buyer 2 Email', 'Secondary Email']
+                    }
+                    
+                    select_parts = []
+                    for alias, possible_columns in column_mappings.items():
+                        found_column = None
+                        for col in possible_columns:
+                            if col in available_columns:
+                                found_column = col
+                                break
+                        
+                        if found_column:
+                            select_parts.append(f'"{found_column}" as {alias}')
+                        else:
+                            # Use NULL for missing columns
+                            select_parts.append(f'NULL as {alias}')
+                    
+                    return ', '.join(select_parts)
+                
                 base_select = f"""
-                    SELECT 
-                        "Potential Buyer 1" as company_name,
-                        "Potential Buyer 1 Contact Details" as contact_details,
-                        "Potential Buyer 1 email id" as email,
-                        "Quantity",
-                        "Unit_Price",
-                        "Item_Description",
-                        "part_number",
-                        "UQC",
-                        "Potential Buyer 2" as secondary_buyer,
-                        "Potential Buyer 2 Contact Details" as secondary_buyer_contact,
-                        "Potential Buyer 2 email id" as secondary_buyer_email
+                    SELECT {build_select_statement()}
                     FROM {table_name} 
                     WHERE {where_sql}
                 """
@@ -516,6 +586,11 @@ async def search_part_number_bulk(req: BulkPartSearchRequest, db: Session = Depe
                         break
                 except Exception as e:  # pragma: no cover
                     last_exception = e
+                    # Rollback transaction to reset state for next iteration
+                    try:
+                        db.rollback()
+                    except:
+                        pass
                     continue
 
             # Fallback fuzzy_python if no results and mode allows
@@ -527,11 +602,48 @@ async def search_part_number_bulk(req: BulkPartSearchRequest, db: Session = Depe
                     where = " OR ".join(clauses)
                     params = {"tok_" + str(i): f"%{t}%" for i, t in enumerate(tokens)}
                     limit = min(1000, PART_NUMBER_CONFIG.get("db_batch_size", 5000))
+                    
+                    # Build dynamic SELECT for fallback search
+                    def build_fallback_select():
+                        all_columns_result = db.execute(text(f"""
+                            SELECT column_name 
+                            FROM information_schema.columns 
+                            WHERE table_name = '{table_name}' 
+                            ORDER BY ordinal_position
+                        """)).fetchall()
+                        available_columns = [row[0] for row in all_columns_result]
+                        
+                        column_mappings = {
+                            'company_name': ['Potential Buyer 1', 'Company Name', 'Buyer 1', 'Company'],
+                            'contact_details': ['Potential Buyer 1 Contact Details', 'Contact Details', 'Contact', 'Phone'],
+                            'email': ['Potential Buyer 1 email id', 'Email', 'Email ID', 'Email Address'],
+                            'quantity': ['Quantity', 'Qty', 'Amount'],
+                            'unit_price': ['Unit_Price', 'Unit Price', 'Price', 'Cost'],
+                            'item_description': ['Item_Description', 'Item Description', 'Description', 'Product'],
+                            'part_number': ['part_number', 'Part Number', 'Part No', 'Part'],
+                            'uqc': ['UQC', 'Unit', 'Unit of Measure'],
+                            'secondary_buyer': ['Potential Buyer 2', 'Buyer 2', 'Secondary Buyer'],
+                            'secondary_buyer_contact': ['Potential Buyer 2 Contact Details', 'Buyer 2 Contact', 'Secondary Contact'],
+                            'secondary_buyer_email': ['Potential Buyer 2 email id', 'Buyer 2 Email', 'Secondary Email']
+                        }
+                        
+                        select_parts = []
+                        for alias, possible_columns in column_mappings.items():
+                            found_column = None
+                            for col in possible_columns:
+                                if col in available_columns:
+                                    found_column = col
+                                    break
+                            
+                            if found_column:
+                                select_parts.append(f'"{found_column}"')
+                            else:
+                                select_parts.append('NULL')
+                        
+                        return ', '.join(select_parts)
+                    
                     rows = db.execute(text(f"""
-                        SELECT 
-                            "Potential Buyer 1", "Potential Buyer 1 Contact Details", "Potential Buyer 1 email id",
-                            "Quantity", "Unit_Price", "Item_Description", "part_number", "UQC", "Potential Buyer 2",
-                            "Potential Buyer 2 Contact Details", "Potential Buyer 2 email id"
+                        SELECT {build_fallback_select()}
                         FROM {table_name}
                         WHERE {where}
                         LIMIT :lim
@@ -606,7 +718,21 @@ async def search_part_number_bulk(req: BulkPartSearchRequest, db: Session = Depe
             }
             results[pn] = payload
         except Exception as e:
-            results[pn] = {"error": f"Search failed: {e}"}
+            # Ensure transaction is rolled back on error
+            try:
+                db.rollback()
+            except:
+                pass
+            
+            results[pn] = {
+                "part_number": pn,
+                "total_matches": 0,
+                "companies": [],
+                "message": f"Search failed: {str(e)}",
+                "cached": False,
+                "latency_ms": int((time.perf_counter() - start_time) * 1000),
+                "error": str(e)
+            }
 
     return {
         "results": results,
