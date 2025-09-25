@@ -46,6 +46,14 @@ class Settings(BaseSettings):
     GOOGLE_API_KEY: Optional[str] = None
     GEMINI_MODEL: str = "gemini-1.5-flash"
 
+    # Elasticsearch
+    ES_HOST: Optional[str] = os.getenv("ES_HOST")  # e.g. https://<cloud-endpoint>:443
+    ES_USERNAME: Optional[str] = os.getenv("ES_USERNAME")
+    ES_PASSWORD: Optional[str] = os.getenv("ES_PASSWORD")
+    ES_API_KEY: Optional[str] = os.getenv("ES_API_KEY")  # Base64 API key (id:api_key)
+    ES_INDEX_PREFIX: str = os.getenv("ES_INDEX_PREFIX", "parts_search")
+    ES_TIMEOUT_MS: int = int(os.getenv("ES_TIMEOUT_MS", "5000"))
+
     # Ingestion tuning
     INGEST_BATCH_SIZE: int = 5000
     CHROMA_UPSERT_CHUNK: int = 5000

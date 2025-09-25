@@ -8,9 +8,31 @@ from app.models.database.file import File as FileModel
 from app.services.supabase_client import get_supabase
 from app.services.data_processor.batch_processor import process_in_batches
 from app.services.database.index_manager import create_search_indexes
+from app.services.database.ultra_fast_index_manager import create_ultra_fast_indexes, optimize_table_for_bulk_search
+from app.services.cache.ultra_fast_cache_manager import ultra_fast_cache
 from app.core.websocket_manager import websocket_manager
+from app.services.search_engine.data_sync import DataSyncService
 
 logger = logging.getLogger("file_processor")
+
+
+def get_common_part_numbers(session: Session, table_name: str, limit: int = 100) -> list[str]:
+	"""Get common part numbers from a table for cache warming"""
+	try:
+		from sqlalchemy import text
+		result = session.execute(text(f"""
+			SELECT "part_number", COUNT(*) as frequency
+			FROM {table_name}
+			WHERE "part_number" IS NOT NULL 
+			AND "part_number" != ''
+			GROUP BY "part_number"
+			ORDER BY frequency DESC
+			LIMIT {limit}
+		""")).fetchall()
+		return [row[0] for row in result]
+	except Exception as e:
+		logger.warning(f"Failed to get common part numbers for {table_name}: {e}")
+		return []
 
 
 def run(file_id: int, content: bytes | None = None, filename: str | None = None) -> None:
@@ -80,15 +102,46 @@ def run(file_id: int, content: bytes | None = None, filename: str | None = None)
 		except Exception as e:
 			logger.warning(f"Failed to create indexes for table {table_name}: {e}")
 		
+		# Create ultra-fast indexes for bulk search optimization
+		try:
+			create_ultra_fast_indexes(session, table_name)
+			optimize_table_for_bulk_search(session, table_name)
+			logger.info(f"Created ultra-fast indexes for table {table_name}")
+		except Exception as e:
+			logger.warning(f"Failed to create ultra-fast indexes for table {table_name}: {e}")
+		
+		# Warm up cache with common part numbers for better performance
+		try:
+			common_parts = get_common_part_numbers(session, table_name)
+			ultra_fast_cache.warm_up_cache(table_name, common_parts)
+			logger.info(f"Warmed up cache for table {table_name} with {len(common_parts)} common parts")
+		except Exception as e:
+			logger.warning(f"Failed to warm up cache for table {table_name}: {e}")
+		
 		# Notify processing complete
 		logger.info(f"Processing complete for file {file_id}: {total} rows processed")
 		try:
+			# Trigger Elasticsearch sync so bulk ES search is ready automatically
+			sync_service = DataSyncService()
+			sync_ok = False
+			try:
+				sync_ok = sync_service.sync_file_to_elasticsearch(file_id)
+			except Exception as sync_err:
+				logger.warning(f"Elasticsearch sync failed for file {file_id}: {sync_err}")
+			
 			loop = None
 			try:
 				loop = asyncio.get_running_loop()
 			except RuntimeError:
 				loop = None
-			message = {"type": "processing_complete", "file_id": file_id, "total_rows": int(total)}
+			message = {
+				"type": "processing_complete", 
+				"file_id": file_id, 
+				"total_rows": int(total),
+				"ultra_fast_optimized": True,
+				"bulk_search_ready": True,
+				"elasticsearch_synced": bool(sync_ok)
+			}
 			if loop and loop.is_running():
 				loop.create_task(websocket_manager.send_progress(str(file_id), message))
 			else:

@@ -17,7 +17,7 @@ router = APIRouter()
 
 
 def _process_file_background(file_id: int) -> None:
-    # Placeholder: enqueue to worker or process
+    # Legacy placeholder kept for compatibility
     return None
 
 
@@ -60,7 +60,13 @@ async def upload_file(background: BackgroundTasks, file: UploadFile = File(...),
                 db.add(obj)
                 db.commit()
                 db.refresh(obj)
-                background.add_task(process_file, obj.id)
+                # Start processing in a separate thread so it continues if client navigates away
+                try:
+                    import threading
+                    threading.Thread(target=process_file, args=(obj.id,), daemon=True).start()
+                except Exception as thread_err:
+                    log.warning("Thread start failed, falling back to BackgroundTasks: %s", thread_err)
+                    background.add_task(process_file, obj.id)
                 return FileRead.from_orm(obj)
             except Exception as storage_error:
                 # fall through to direct ingestion
@@ -74,7 +80,13 @@ async def upload_file(background: BackgroundTasks, file: UploadFile = File(...),
         db.add(obj)
         db.commit()
         db.refresh(obj)
-        background.add_task(process_file, obj.id, content, file.filename)
+        # Start processing in a separate thread so it continues if client navigates away
+        try:
+            import threading
+            threading.Thread(target=process_file, args=(obj.id, content, file.filename), daemon=True).start()
+        except Exception as thread_err:
+            log.warning("Thread start failed, falling back to BackgroundTasks: %s", thread_err)
+            background.add_task(process_file, obj.id, content, file.filename)
         return FileRead.from_orm(obj)
     except Exception as e:
         log.error("Upload failed for filename=%s content_type=%s: %s", getattr(file, "filename", None), getattr(file, "content_type", None), e)

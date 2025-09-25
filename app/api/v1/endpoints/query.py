@@ -318,7 +318,7 @@ async def search_part_number(req: PartNumberSearchRequest, db: Session = Depends
             "page": int(req.page or 1),
             "page_size": size,
             "total_pages": total_pages,
-            "message": f"Found {total_count} companies with part number '{req.part_number}'. Price range: ${min_price:.2f} - ${max_price:.2f}",
+            "message": f"Found {total_count} companies with part number '{req.part_number}'. Price range: ₹{min_price:.2f} - ₹{max_price:.2f}",
             "cached": False,
             "latency_ms": int((time.perf_counter() - start_time) * 1000),
             "table_name": table_name,
@@ -707,7 +707,7 @@ async def search_part_number_bulk(req: BulkPartSearchRequest, db: Session = Depe
                 "page": int(base_page),
                 "page_size": size,
                 "total_pages": total_pages,
-                "message": f"Found {total_count} companies with part number '{pn}'. Price range: ${min_price:.2f} - ${max_price:.2f}",
+                "message": f"Found {total_count} companies with part number '{pn}'. Price range: ₹{min_price:.2f} - ₹{max_price:.2f}",
                 "cached": False,
                 "latency_ms": int((time.perf_counter() - start_time) * 1000),
                 "searched_columns": text_columns,
@@ -776,8 +776,17 @@ async def search_part_number_bulk_upload(file_id: int = Form(...), file: UploadF
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to parse file: {e}")
 
-    payload = BulkPartSearchRequest(file_id=file_id, part_numbers=parts, page=1, page_size=50, show_all=False)
-    return await search_part_number_bulk(payload, db, user)
+    # Route through Elasticsearch-powered endpoint (has built-in fallback to PostgreSQL)
+    from app.api.v1.endpoints.query_elasticsearch import search_part_number_bulk_elasticsearch
+    payload = {
+        'file_id': file_id, 
+        'part_numbers': parts, 
+        'page': 1, 
+        'page_size': 50, 
+        'show_all': False,
+        'search_mode': 'hybrid'
+    }
+    return await search_part_number_bulk_elasticsearch(payload, db, user)
 
 @router.get("/test-search/{file_id}")
 async def test_search_endpoint(file_id: int, db: Session = Depends(get_db), user=Depends(get_current_user)) -> dict:
