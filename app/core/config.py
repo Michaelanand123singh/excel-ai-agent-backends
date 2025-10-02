@@ -12,6 +12,11 @@ class Settings(BaseSettings):
 
     # CORS - Handle both JSON array and comma-separated string
     CORS_ALLOW_ORIGINS: str = "http://localhost:5173,http://127.0.0.1:5173,http://localhost,http://127.0.0.1,https://excel-ai-agent-frontend-765930447632.asia-southeast1.run.app"
+    # Optional regex to match dynamic frontend URLs (e.g., Cloud Run revisions)
+    CORS_ALLOW_ORIGIN_REGEX: Optional[str] = os.getenv(
+        "CORS_ALLOW_ORIGIN_REGEX",
+        r"^https:\/\/excel-ai-agent-frontend-[0-9]+\.asia-southeast1\.run\.app$",
+    )
     
     @property
     def cors_origins_list(self) -> List[str]:
