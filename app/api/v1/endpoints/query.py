@@ -239,6 +239,8 @@ async def search_part_number(req: PartNumberSearchRequest, db: Session = Depends
                             "part_number": row[6] or "N/A",
                             "uqc": row[7] or "N/A",
                             "secondary_buyer": row[8] or "N/A",
+                            "secondary_buyer_contact": row[9] or "N/A",
+                            "secondary_buyer_email": row[10] or "N/A",
                         })
                     break
             except Exception as e:  # pragma: no cover
@@ -257,7 +259,8 @@ async def search_part_number(req: PartNumberSearchRequest, db: Session = Depends
                 rows = db.execute(text(f"""
                     SELECT 
                         "Potential Buyer 1", "Potential Buyer 1 Contact Details", "Potential Buyer 1 email id",
-                        "Quantity", "Unit_Price", "Item_Description", "part_number", "UQC", "Potential Buyer 2"
+                        "Quantity", "Unit_Price", "Item_Description", "part_number", "UQC",
+                        "Potential Buyer 2", "Potential Buyer 2 Contact Details", "Potential Buyer 2 email id"
                     FROM {table_name}
                     WHERE {where}
                     LIMIT :lim
@@ -301,6 +304,8 @@ async def search_part_number(req: PartNumberSearchRequest, db: Session = Depends
                         "part_number": r[6] or "N/A",
                         "uqc": r[7] or "N/A",
                         "secondary_buyer": r[8] or "N/A",
+                        "secondary_buyer_contact": r[9] or "N/A",
+                        "secondary_buyer_email": r[10] or "N/A",
                     })
         
         size = max(1, min(2000, int(req.page_size or 50)))

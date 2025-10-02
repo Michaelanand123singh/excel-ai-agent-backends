@@ -119,7 +119,9 @@ class MultiFieldSearchEngine:
                 "Item_Description",
                 "part_number",
                 "UQC",
-                "Potential Buyer 2" as secondary_buyer
+                "Potential Buyer 2" as secondary_buyer,
+                "Potential Buyer 2 Contact Details" as secondary_buyer_contact,
+                "Potential Buyer 2 email id" as secondary_buyer_email
             FROM {self.table_name}
             WHERE 
                 LOWER("part_number") = LOWER(:part_number) OR
@@ -161,6 +163,8 @@ class MultiFieldSearchEngine:
                 "part_number",
                 "UQC",
                 "Potential Buyer 2" as secondary_buyer,
+                "Potential Buyer 2 Contact Details" as secondary_buyer_contact,
+                "Potential Buyer 2 email id" as secondary_buyer_email,
                 similarity(lower("part_number"), lower(:part_number)) as sim_score
             FROM {self.table_name}
             WHERE similarity(lower("part_number"), lower(:part_number)) >= :min_similarity
@@ -176,7 +180,7 @@ class MultiFieldSearchEngine:
             
             if results:
                 best_result = results[0]
-                confidence = float(best_result[9]) * 100  # Convert similarity to percentage
+                confidence = float(best_result[11]) * 100  # Convert similarity to percentage
                 return self._format_search_result(
                     best_result, "found", "fuzzy_part_number", confidence, quantity
                 )
@@ -200,7 +204,9 @@ class MultiFieldSearchEngine:
                 "Item_Description",
                 "part_number",
                 "UQC",
-                "Potential Buyer 2" as secondary_buyer
+                "Potential Buyer 2" as secondary_buyer,
+                "Potential Buyer 2 Contact Details" as secondary_buyer_contact,
+                "Potential Buyer 2 email id" as secondary_buyer_email
             FROM {self.table_name}
             WHERE "part_number" ILIKE :pattern
             LIMIT 1000
@@ -222,7 +228,7 @@ class MultiFieldSearchEngine:
         best_score = 0.0
         
         for result in results:
-            db_part_number = result[6] or ""
+            db_part_number = result[7] or ""
             
             # Calculate similarity across different normalization levels
             scores = [
@@ -261,7 +267,9 @@ class MultiFieldSearchEngine:
                 "Item_Description",
                 "part_number",
                 "UQC",
-                "Potential Buyer 2" as secondary_buyer
+                "Potential Buyer 2" as secondary_buyer,
+                "Potential Buyer 2 Contact Details" as secondary_buyer_contact,
+                "Potential Buyer 2 email id" as secondary_buyer_email
             FROM {self.table_name}
             WHERE "Item_Description" ILIKE :pattern
             ORDER BY "Unit_Price" ASC
@@ -316,7 +324,9 @@ class MultiFieldSearchEngine:
                 "Item_Description",
                 "part_number",
                 "UQC",
-                "Potential Buyer 2" as secondary_buyer
+                "Potential Buyer 2" as secondary_buyer,
+                "Potential Buyer 2 Contact Details" as secondary_buyer_contact,
+                "Potential Buyer 2 email id" as secondary_buyer_email
             FROM {self.table_name}
             WHERE 
                 ("part_number" ILIKE :part_pattern OR "Item_Description" ILIKE :name_pattern)
@@ -375,7 +385,9 @@ class MultiFieldSearchEngine:
                 "item_description": db_result[5] or "N/A",
                 "part_number": db_result[6] or "N/A",
                 "uqc": db_result[7] or "N/A",
-                "secondary_buyer": db_result[8] or "N/A"
+                "secondary_buyer": db_result[8] or "N/A",
+                "secondary_buyer_contact": db_result[9] or "N/A",
+                "secondary_buyer_email": db_result[10] or "N/A"
             },
             "price_calculation": {
                 "unit_price": unit_price,
