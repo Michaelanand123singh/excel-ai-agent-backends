@@ -132,6 +132,9 @@ async def bulk_excel_search(
                         'item_description': top.get('item_description', 'N/A'),
                         'part_number': top.get('part_number', pn),
                         'uqc': top.get('uqc', 'N/A'),
+                        'secondary_buyer': top.get('secondary_buyer', 'N/A'),
+                        'secondary_buyer_contact': top.get('secondary_buyer_contact', 'N/A'),
+                        'secondary_buyer_email': top.get('secondary_buyer_email', 'N/A'),
                     }
                     search_result = {
                         'match_status': 'found',
@@ -393,6 +396,9 @@ async def export_bulk_search_results(
                     "Found_Company": db_record.get("company_name", ""),
                     "Found_Contact": db_record.get("contact_details", ""),
                     "Found_Email": db_record.get("email", ""),
+                    "Secondary_Buyer": db_record.get("secondary_buyer", ""),
+                    "Secondary_Buyer_Contact": db_record.get("secondary_buyer_contact", ""),
+                    "Secondary_Buyer_Email": db_record.get("secondary_buyer_email", ""),
                     "Unit_Price": price_calc.get("unit_price", 0),
                     "Total_Cost": price_calc.get("total_cost", 0),
                     "Available_Quantity": price_calc.get("available_quantity", 0),
@@ -424,6 +430,7 @@ async def export_bulk_search_results(
                     "User_Part_Number", "User_Part_Name", "User_Quantity", "User_Manufacturer",
                     "Match_Status", "Match_Type", "Confidence", "Found_Part_Number",
                     "Found_Description", "Found_Company", "Found_Contact", "Found_Email",
+                    "Secondary_Buyer", "Secondary_Buyer_Contact", "Secondary_Buyer_Email",
                     "Unit_Price", "Total_Cost", "Available_Quantity", "UQC", "Search_Time_Ms"
                 ]
                 writer = csv.DictWriter(csv_buffer, fieldnames=fieldnames)
@@ -448,6 +455,9 @@ async def export_bulk_search_results(
                         "Found_Company": db_record.get("company_name", ""),
                         "Found_Contact": db_record.get("contact_details", ""),
                         "Found_Email": db_record.get("email", ""),
+                        "Secondary_Buyer": db_record.get("secondary_buyer", ""),
+                        "Secondary_Buyer_Contact": db_record.get("secondary_buyer_contact", ""),
+                        "Secondary_Buyer_Email": db_record.get("secondary_buyer_email", ""),
                         "Unit_Price": price_calc.get("unit_price", 0),
                         "Total_Cost": price_calc.get("total_cost", 0),
                         "Available_Quantity": price_calc.get("available_quantity", 0),
