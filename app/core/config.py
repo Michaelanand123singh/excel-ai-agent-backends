@@ -1,3 +1,6 @@
+# ============================================
+# FILE 1: app/core/config.py
+# ============================================
 from functools import lru_cache
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import field_validator
@@ -15,14 +18,16 @@ class Settings(BaseSettings):
     # Optional regex to match dynamic frontend URLs (e.g., Cloud Run revisions)
     CORS_ALLOW_ORIGIN_REGEX: Optional[str] = os.getenv(
         "CORS_ALLOW_ORIGIN_REGEX",
-        r"^https:\/\/excel-ai-agent-frontend-[0-9]+\.asia-southeast1\.run\.app$",
+        r"^https:\/\/excel-ai-agent-frontend-[0-9a-z\-]+\.asia-southeast1\.run\.app$",
     )
     
     @property
     def cors_origins_list(self) -> List[str]:
         """Convert CORS_ALLOW_ORIGINS string to list"""
         if isinstance(self.CORS_ALLOW_ORIGINS, str):
-            return [origin.strip() for origin in self.CORS_ALLOW_ORIGINS.split(",")]
+            origins = [origin.strip() for origin in self.CORS_ALLOW_ORIGINS.split(",")]
+            # Filter out empty strings
+            return [origin for origin in origins if origin]
         return self.CORS_ALLOW_ORIGINS
 
     # Runtime
