@@ -38,8 +38,18 @@ def create_app() -> FastAPI:
         allow_origins=settings.cors_origins_list,
         allow_origin_regex=settings.CORS_ALLOW_ORIGIN_REGEX,
         allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+        allow_headers=[
+            "Accept",
+            "Accept-Language",
+            "Content-Language",
+            "Content-Type",
+            "Authorization",
+            "X-Requested-With",
+            "Origin",
+            "Access-Control-Request-Method",
+            "Access-Control-Request-Headers",
+        ],
         expose_headers=["X-Process-Time-ms"],
         max_age=600,
     )
@@ -52,19 +62,6 @@ def create_app() -> FastAPI:
         # Log all requests
         origin = request.headers.get("origin", "no-origin")
         logger.info(f"📨 {request.method} {request.url.path} from {origin}")
-        
-        # Handle preflight OPTIONS requests immediately
-        if request.method == "OPTIONS":
-            logger.info(f"✅ Preflight OPTIONS handled for {request.url.path}")
-            return Response(
-                status_code=200,
-                headers={
-                    "Access-Control-Allow-Origin": origin if origin != "no-origin" else "*",
-                    "Access-Control-Allow-Methods": "*",
-                    "Access-Control-Allow-Headers": "*",
-                    "Access-Control-Allow-Credentials": "true",
-                }
-            )
         
         start = time.perf_counter()
         try:
@@ -83,10 +80,6 @@ def create_app() -> FastAPI:
     # -----------------------------
     @application.middleware("http")
     async def security_headers_middleware(request: Request, call_next):
-        # Skip security headers for preflight requests
-        if request.method == "OPTIONS":
-            return Response(status_code=200)
-            
         response: Response = await call_next(request)
         
         # Only add security headers to HTML responses or when appropriate
@@ -130,6 +123,17 @@ def create_app() -> FastAPI:
             "service": settings.APP_NAME,
             "version": settings.VERSION,
             "environment": settings.ENV
+        }
+
+    # -----------------------------
+    # CORS test endpoint
+    # -----------------------------
+    @application.get("/cors-test")
+    async def cors_test():
+        return {
+            "message": "CORS is working!",
+            "cors_origins": settings.cors_origins_list,
+            "cors_regex": settings.CORS_ALLOW_ORIGIN_REGEX
         }
 
     # -----------------------------
