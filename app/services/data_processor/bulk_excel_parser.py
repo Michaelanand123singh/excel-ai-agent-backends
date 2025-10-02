@@ -7,6 +7,12 @@ from __future__ import annotations
 
 import io
 import pandas as pd
+import re
+from typing import Union
+try:
+    import numpy as np
+except Exception:  # pragma: no cover
+    np = None  # type: ignore
 from typing import List, Dict, Any, Tuple, Optional
 from dataclasses import dataclass
 from enum import Enum
@@ -116,22 +122,80 @@ class BulkExcelParser:
                 if load_workbook is None:
                     df = pd.read_excel(io.BytesIO(file_bytes), engine='openpyxl')
                 else:
-                    # Use openpyxl for better performance on large files
+                    # Use openpyxl for better performance on large files and robust header detection
                     wb = load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
                     ws = wb.worksheets[0]
-                    
-                    # Convert to DataFrame
-                    data = []
+
+                    # Extract up to first 2000 rows defensively
+                    raw_rows = []
+                    max_take = 2000
+                    count = 0
                     for row in ws.iter_rows(values_only=True):
-                        data.append(row)
+                        raw_rows.append(list(row))
+                        count += 1
+                        if count >= max_take:
+                            break
                     wb.close()
-                    
-                    if not data:
+
+                    if not raw_rows:
                         return [], ["File is empty"]
-                    
-                    # First row as headers
-                    headers = [str(h) if h is not None else f"Column_{i}" for i, h in enumerate(data[0])]
-                    df = pd.DataFrame(data[1:], columns=headers)
+
+                    # Find header row by matching required header variations
+                    header_variations = {
+                        "part number": ["part number", "part_number", "partnumber", "part no", "partno", "pn"],
+                        "part name": ["part name", "part_name", "partname", "description", "desc", "item name"],
+                        "quantity": ["quantity", "qty", "amount", "count", "units"],
+                        "manufacturer name": ["manufacturer name", "manufacturer_name", "manufacturer", "mfg", "brand", "supplier"],
+                    }
+
+                    def normalize_cell(v):
+                        if v is None:
+                            return ""
+                        return str(v).strip().lower()
+
+                    header_row_index = 0
+                    best_score = -1
+                    # Scan first 20 rows for a plausible header row
+                    for idx, row in enumerate(raw_rows[:20]):
+                        normalized = [normalize_cell(c) for c in row]
+                        score = 0
+                        for required, variants in header_variations.items():
+                            if any(v in normalized for v in variants):
+                                score += 1
+                        if score > best_score:
+                            best_score = score
+                            header_row_index = idx
+
+                    headers_raw = raw_rows[header_row_index]
+                    # Determine width using the widest row among header+next 50 rows
+                    width = max(len(headers_raw), max((len(r) for r in raw_rows[header_row_index:header_row_index+50]), default=len(headers_raw)))
+
+                    # Build headers with fallbacks "Column_i" for empty cells
+                    headers = []
+                    for i in range(width):
+                        val = headers_raw[i] if i < len(headers_raw) else None
+                        headers.append(str(val) if val is not None and str(val).strip() else f"Column_{i}")
+
+                    # Collect data rows after the header row, pad/truncate to width
+                    data_rows = []
+                    for r in raw_rows[header_row_index+1:]:
+                        row_vals = list(r)
+                        if len(row_vals) < width:
+                            row_vals = row_vals + [None] * (width - len(row_vals))
+                        elif len(row_vals) > width:
+                            row_vals = row_vals[:width]
+                        data_rows.append(row_vals)
+
+                    # Drop leading completely empty rows
+                    def is_all_empty(row):
+                        return all((c is None or str(c).strip() == "") for c in row)
+                    while data_rows and is_all_empty(data_rows[0]):
+                        data_rows.pop(0)
+
+                    if not data_rows:
+                        return [], ["No data rows found after header"]
+
+                    df = pd.DataFrame(data_rows, columns=headers)
             
             if df.empty:
                 return [], ["File contains no data"]
@@ -143,11 +207,50 @@ class BulkExcelParser:
             if not is_valid:
                 return [], [error_msg]
             
+            # Helper to normalize part number values (e.g., 3585720.0 -> "3585720")
+            def normalize_part_number_value(value: Any) -> str:
+                # Direct string handling first
+                if isinstance(value, str):
+                    s = value.replace('\u00A0', ' ').replace(',', '').strip()
+                    # drop trailing .0 or .00... if the rest are digits
+                    if re.fullmatch(r"\d+\.0+", s):
+                        return s.split(".")[0]
+                    if re.fullmatch(r"\d+", s):
+                        return s
+                    # Also handle strings like '3585720.00 '
+                    m = re.fullmatch(r"(\d+)\.(0+)", s)
+                    if m:
+                        return m.group(1)
+                    return s
+                # Numeric types: numpy or python
+                try:
+                    # numpy numeric types
+                    if np is not None and isinstance(value, (np.integer, np.floating)):
+                        # If float but integral, cast to int then str
+                        try:
+                            f = float(value)
+                            if float(f).is_integer():
+                                return str(int(f))
+                            return str(value)
+                        except Exception:
+                            return str(value)
+                except Exception:
+                    pass
+                if isinstance(value, (int,)):
+                    return str(int(value))
+                if isinstance(value, float):
+                    if float(value).is_integer():
+                        return str(int(value))
+                    return str(value)
+                # Fallback
+                return str(value).replace('\u00A0', ' ').replace(',', '').strip()
+
             # Process each row
             for idx, row in df.iterrows():
                 try:
                     # Extract data using column mapping
-                    part_number = str(row[column_mapping["part number"]]).strip() if pd.notna(row[column_mapping["part number"]]) else ""
+                    raw_pn = row[column_mapping["part number"]] if pd.notna(row[column_mapping["part number"]]) else ""
+                    part_number = normalize_part_number_value(raw_pn)
                     part_name = str(row[column_mapping["part name"]]).strip() if pd.notna(row[column_mapping["part name"]]) else ""
                     manufacturer_name = str(row[column_mapping["manufacturer name"]]).strip() if pd.notna(row[column_mapping["manufacturer name"]]) else ""
                     

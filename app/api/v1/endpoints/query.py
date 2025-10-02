@@ -762,17 +762,102 @@ async def search_part_number_bulk_upload(file_id: int = Form(...), file: UploadF
         name = (file.filename or "").lower()
         df = None
         bio = io.BytesIO(content)
+
+        # 1) Load dataframe with robust fallbacks for CSV/XLSX/XLS
         if name.endswith(".csv"):
-            df = pd.read_csv(bio)
+            # Try utf-8 first, then fallback to latin1
+            try:
+                df = pd.read_csv(bio)
+            except Exception:
+                bio.seek(0)
+                df = pd.read_csv(bio, encoding="latin1")
         else:
-            df = pd.read_excel(bio, engine="openpyxl")
+            # Excel: try without engine (let pandas pick), then fall back to openpyxl
+            try:
+                df = pd.read_excel(bio)
+            except Exception:
+                # Fallback to openpyxl explicitly for .xlsx
+                try:
+                    bio.seek(0)
+                    df = pd.read_excel(bio, engine="openpyxl")
+                except Exception as e:
+                    raise HTTPException(status_code=400, detail=f"Failed to read Excel file: {e}")
+
         if df is None or df.empty:
             return {"results": {}, "total_parts": 0}
 
-        cols_lower = {c.lower(): c for c in df.columns}
-        chosen = cols_lower.get("part_number") or cols_lower.get("part no") or list(cols_lower.values())[0]
-        parts = [str(v).strip() for v in df[chosen].astype(str).tolist() if str(v).strip() and str(v).strip().lower() != "nan"]
-        parts = parts[:10000]
+        # 2) Choose the correct column for part numbers using flexible variants
+        cols_lower_map = {str(c).strip().lower(): c for c in df.columns}
+        # Known header variants
+        header_variants = [
+            "part_number", "part number", "part no", "part_no", "partno", "pn",
+        ]
+        chosen_col = None
+        for hv in header_variants:
+            if hv in cols_lower_map:
+                chosen_col = cols_lower_map[hv]
+                break
+        # Fallback to the first column if nothing matched
+        if not chosen_col:
+            chosen_col = list(cols_lower_map.values())[0]
+
+        # 3) Extract and sanitize values (normalize numeric-like part numbers e.g. 3585720.0 -> 3585720)
+        import re
+        try:
+            import numpy as np  # type: ignore
+        except Exception:  # pragma: no cover
+            np = None  # type: ignore
+
+        def normalize_pn(v):
+            if v is None:
+                return ""
+            # numpy types
+            if np is not None and isinstance(v, (np.integer, np.floating)):
+                try:
+                    f = float(v)
+                    if float(f).is_integer():
+                        return str(int(f))
+                    return str(v)
+                except Exception:
+                    return str(v)
+            if isinstance(v, (int,)):
+                return str(int(v))
+            if isinstance(v, float):
+                if float(v).is_integer():
+                    return str(int(v))
+                return str(v)
+            s = str(v).replace('\u00A0', ' ').replace(',', '').strip()
+            if re.fullmatch(r"\d+\.0+", s):
+                return s.split(".")[0]
+            m = re.fullmatch(r"(\d+)\.(0+)", s)
+            if m:
+                return m.group(1)
+            return s
+
+        parts = []
+        for v in df[chosen_col].tolist():
+            s = normalize_pn(v)
+            s = (s or "").strip()
+            if not s:
+                continue
+            low = s.lower()
+            if low in ("nan", "none", "null"):
+                continue
+            if len(s) >= 2:
+                parts.append(s)
+
+        # De-dup while preserving order
+        seen = set()
+        unique_parts = []
+        for p in parts:
+            k = p.lower()
+            if k not in seen:
+                seen.add(k)
+                unique_parts.append(p)
+
+        parts = unique_parts[:10000]
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to parse file: {e}")
 
