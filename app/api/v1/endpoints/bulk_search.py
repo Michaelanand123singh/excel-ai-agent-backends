@@ -14,7 +14,7 @@ import logging
 from app.api.dependencies.database import get_db
 from app.api.dependencies.auth import get_current_user
 from app.services.data_processor.bulk_excel_parser import BulkExcelParser, BulkSearchConfig, UserPartData
-from app.services.data_processor.multi_field_search import MultiFieldSearchEngine, BulkSearchResult
+from app.services.data_processor.multi_field_search import MultiFieldSearchEngine, BulkSearchResult, SearchResult
 from app.core.cache import get_redis_client
 
 router = APIRouter()
@@ -87,31 +87,127 @@ async def bulk_excel_search(
         if not exists:
             raise HTTPException(status_code=404, detail=f"Dataset {file_id} not found")
         
-        # Initialize search engine
-        search_engine = MultiFieldSearchEngine(db, table_name)
-        
-        # Process parts in batches
-        results = []
+        # Build list of parsed part numbers
+        parsed_parts = [p.part_number for p in user_parts if isinstance(p.part_number, str) and p.part_number.strip()]
         total_parts = len(user_parts)
+
+        # Prefer Elasticsearch bulk search (same as textarea flow) for consistency
+        es_results_map: Dict[str, Any] = {}
+        try:
+            from app.api.v1.endpoints.query_elasticsearch import search_part_number_bulk_elasticsearch
+            es_payload = {
+                'file_id': file_id,
+                'part_numbers': parsed_parts,
+                'page': 1,
+                'page_size': 3,
+                'show_all': False,
+                'search_mode': search_mode,
+            }
+            es_resp = await search_part_number_bulk_elasticsearch(es_payload, db, user)
+            # es_resp['results'] is a mapping part_number -> { companies: [...] }
+            es_results_map = (es_resp or {}).get('results', {})
+        except Exception:
+            # Fallback to multi-field DB search if ES fails
+            search_engine = MultiFieldSearchEngine(db, table_name)
+            es_results_map = {}
+
+        results = []
         found_matches = 0
         partial_matches = 0
         no_matches = 0
-        
-        # Process in batches for performance
-        batch_size = BULK_SEARCH_CONFIG.batch_size
-        for i in range(0, total_parts, batch_size):
-            batch = user_parts[i:i + batch_size]
-            batch_results = await process_batch(search_engine, batch, search_mode)
-            results.extend(batch_results)
-            
-            # Update counters
-            for result in batch_results:
-                if result.search_result.match_status == "found":
+
+        for up in user_parts:
+            pn = (up.part_number or '').strip()
+            es_entry = es_results_map.get(pn)
+            if es_entry and isinstance(es_entry, dict):
+                companies = es_entry.get('companies') or []
+                if companies:
+                    top = companies[0]
+                    db_record = {
+                        'company_name': top.get('company_name', 'N/A'),
+                        'contact_details': top.get('contact_details', 'N/A'),
+                        'email': top.get('email', 'N/A'),
+                        'quantity': top.get('quantity', 0),
+                        'unit_price': top.get('unit_price', 0.0),
+                        'item_description': top.get('item_description', 'N/A'),
+                        'part_number': top.get('part_number', pn),
+                        'uqc': top.get('uqc', 'N/A'),
+                    }
+                    search_result = {
+                        'match_status': 'found',
+                        'match_type': es_entry.get('match_type', 'bulk_optimized'),
+                        'confidence': 100.0,
+                        'database_record': db_record,
+                        'price_calculation': {
+                            'unit_price': db_record['unit_price'],
+                            'total_cost': float(db_record['unit_price'] or 0) * float(up.quantity or 0),
+                            'available_quantity': db_record.get('quantity', 0),
+                        },
+                        'search_time_ms': es_entry.get('latency_ms', 0)
+                    }
+                    results.append(BulkSearchResult(user_data={
+                        'part_number': up.part_number,
+                        'part_name': up.part_name,
+                        'quantity': up.quantity,
+                        'manufacturer_name': up.manufacturer_name,
+                        'row_index': up.row_index
+                    }, search_result=SearchResult(**search_result), processing_errors=[]))
                     found_matches += 1
-                elif result.search_result.match_status == "partial":
-                    partial_matches += 1
+                    continue
+
+            # If no ES result, optionally fallback to multi-field search for this row
+            try:
+                if 'search_engine' not in locals():
+                    search_engine = MultiFieldSearchEngine(db, table_name)
+                sr = search_engine.search_single_part({
+                    'part_number': up.part_number,
+                    'part_name': up.part_name,
+                    'manufacturer_name': up.manufacturer_name,
+                    'quantity': up.quantity
+                }, search_mode)
+                if sr and sr.match_status != 'not_found':
+                    results.append(BulkSearchResult(user_data={
+                        'part_number': up.part_number,
+                        'part_name': up.part_name,
+                        'quantity': up.quantity,
+                        'manufacturer_name': up.manufacturer_name,
+                        'row_index': up.row_index
+                    }, search_result=sr, processing_errors=[]))
+                    if sr.match_status == 'found':
+                        found_matches += 1
+                    else:
+                        partial_matches += 1
                 else:
+                    results.append(BulkSearchResult(user_data={
+                        'part_number': up.part_number,
+                        'part_name': up.part_name,
+                        'quantity': up.quantity,
+                        'manufacturer_name': up.manufacturer_name,
+                        'row_index': up.row_index
+                    }, search_result=search_engine._create_empty_result(), processing_errors=[]))
                     no_matches += 1
+            except Exception as e:
+                empty_result = None
+                try:
+                    if 'search_engine' in locals():
+                        empty_result = search_engine._create_empty_result()
+                except Exception:
+                    empty_result = SearchResult(
+                        match_status="not_found",
+                        match_type="none",
+                        confidence=0.0,
+                        database_record={},
+                        price_calculation={"unit_price": 0.0, "total_cost": 0.0, "available_quantity": 0},
+                        search_time_ms=0.0
+                    )
+                results.append(BulkSearchResult(user_data={
+                    'part_number': up.part_number,
+                    'part_name': up.part_name,
+                    'quantity': up.quantity,
+                    'manufacturer_name': up.manufacturer_name,
+                    'row_index': up.row_index
+                }, search_result=empty_result, processing_errors=[f"Search failed: {str(e)}"]))
+                no_matches += 1
         
         processing_time = (time.perf_counter() - start_time) * 1000
         
