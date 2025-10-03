@@ -772,7 +772,7 @@ async def search_part_number_bulk_upload(file_id: int = Form(...), file: UploadF
         if name.endswith(".csv"):
             # Try utf-8 first, then fallback to latin1
             try:
-                df = pd.read_csv(bio)
+            df = pd.read_csv(bio)
             except Exception:
                 bio.seek(0)
                 df = pd.read_csv(bio, encoding="latin1")
@@ -784,7 +784,7 @@ async def search_part_number_bulk_upload(file_id: int = Form(...), file: UploadF
                 # Fallback to openpyxl explicitly for .xlsx
                 try:
                     bio.seek(0)
-                    df = pd.read_excel(bio, engine="openpyxl")
+            df = pd.read_excel(bio, engine="openpyxl")
                 except Exception as e:
                     raise HTTPException(status_code=400, detail=f"Failed to read Excel file: {e}")
 
