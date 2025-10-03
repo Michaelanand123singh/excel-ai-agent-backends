@@ -28,10 +28,10 @@ class RobustCORSMiddleware(BaseHTTPMiddleware):
                 headers={
                     "Access-Control-Allow-Origin": origin,
                     "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS, PATCH",
-                    "Access-Control-Allow-Headers": "Accept, Accept-Language, Content-Language, Content-Type, Authorization, X-Requested-With, Origin, Access-Control-Request-Method, Access-Control-Request-Headers",
+                    "Access-Control-Allow-Headers": "Accept, Accept-Language, Content-Language, Content-Type, Authorization, X-Requested-With, X-Request-Id, Origin, Access-Control-Request-Method, Access-Control-Request-Headers",
                     "Access-Control-Allow-Credentials": "true",
                     "Access-Control-Max-Age": "600",
-                    "Access-Control-Expose-Headers": "X-Process-Time-ms",
+                    "Access-Control-Expose-Headers": "X-Process-Time-ms, X-Request-Id",
                 }
             )
         
