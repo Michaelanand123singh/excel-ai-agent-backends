@@ -1,7 +1,13 @@
 from passlib.context import CryptContext
 
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# Use bcrypt_sha256 to safely support passwords > 72 bytes,
+# while keeping bcrypt for backward compatibility during verification.
+# New hashes will use bcrypt_sha256; verification will succeed for either.
+pwd_context = CryptContext(
+    schemes=["bcrypt_sha256", "bcrypt"],
+    deprecated="auto",
+)
 
 
 def hash_password(password: str) -> str:
