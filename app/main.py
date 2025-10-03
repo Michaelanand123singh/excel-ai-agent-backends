@@ -46,11 +46,13 @@ def create_app() -> FastAPI:
             "Content-Type",
             "Authorization",
             "X-Requested-With",
+            "X-Request-Id",
+            "x-request-id",
             "Origin",
             "Access-Control-Request-Method",
             "Access-Control-Request-Headers",
         ],
-        expose_headers=["X-Process-Time-ms"],
+        expose_headers=["X-Process-Time-ms", "X-Request-Id", "x-request-id"],
         max_age=600,
     )
 
