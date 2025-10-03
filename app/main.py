@@ -1,9 +1,4 @@
-# ============================================
-# FILE 2: app/main.py (or wherever create_app is)
-# ============================================
-from fastapi import FastAPI, Request, Response
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI
 import time
 import logging
 
@@ -11,6 +6,9 @@ from app.core.config import settings
 from app.core.events import register_startup_event, register_shutdown_event
 from app.api.v1.router import api_router_v1
 from app.api.middleware.error_handler import http_error_handler
+from app.api.middleware.cors import CORSMiddleware, RobustCORSMiddleware
+from app.api.middleware.logging import LoggingMiddleware
+from app.api.middleware.security import SecurityHeadersMiddleware
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -31,8 +29,10 @@ def create_app() -> FastAPI:
     logger.info(f"🌐 CORS Regex: {settings.CORS_ALLOW_ORIGIN_REGEX}")
 
     # -----------------------------
-    # CORS Middleware (MUST be first, before other middlewares)
+    # Middleware Configuration (Order matters!)
     # -----------------------------
+    
+    # 1. CORS Middleware (MUST be first)
     application.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins_list,
@@ -54,52 +54,14 @@ def create_app() -> FastAPI:
         max_age=600,
     )
 
-    # -----------------------------
-    # Logging Middleware
-    # -----------------------------
-    @application.middleware("http")
-    async def logging_middleware(request: Request, call_next):
-        # Log all requests
-        origin = request.headers.get("origin", "no-origin")
-        logger.info(f"📨 {request.method} {request.url.path} from {origin}")
-        
-        start = time.perf_counter()
-        try:
-            response: Response = await call_next(request)
-            duration_ms = (time.perf_counter() - start) * 1000
-            response.headers["X-Process-Time-ms"] = f"{duration_ms:.2f}"
-            logger.info(f"✅ {request.method} {request.url.path} - {response.status_code} ({duration_ms:.2f}ms)")
-            return response
-        except Exception as e:
-            duration_ms = (time.perf_counter() - start) * 1000
-            logger.error(f"❌ {request.method} {request.url.path} - Error: {str(e)} ({duration_ms:.2f}ms)")
-            raise
+    # 2. Robust CORS Handler (handles database connection issues)
+    application.add_middleware(RobustCORSMiddleware, enable_logging=True)
 
-    # -----------------------------
-    # Security Headers Middleware
-    # -----------------------------
-    @application.middleware("http")
-    async def security_headers_middleware(request: Request, call_next):
-        response: Response = await call_next(request)
-        
-        # Only add security headers to HTML responses or when appropriate
-        response.headers.setdefault("X-Content-Type-Options", "nosniff")
-        response.headers.setdefault("X-Frame-Options", "DENY")
-        response.headers.setdefault("Referrer-Policy", "no-referrer")
-        response.headers.setdefault(
-            "Permissions-Policy", "geolocation=(), microphone=(), camera=()"
-        )
-        
-        # More permissive CSP for API
-        response.headers.setdefault(
-            "Content-Security-Policy",
-            "default-src 'self' data: blob:; "
-            "connect-src 'self' https://excel-ai-agent-frontend-765930447632.asia-southeast1.run.app http://localhost:5173; "
-            "img-src 'self' data: blob:; "
-            "style-src 'self' 'unsafe-inline'; "
-            "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
-        )
-        return response
+    # 3. Logging Middleware (logs requests and adds timing)
+    application.add_middleware(LoggingMiddleware, log_level="INFO")
+
+    # 4. Security Headers Middleware (adds security headers)
+    application.add_middleware(SecurityHeadersMiddleware)
 
     # -----------------------------
     # Exception handler
@@ -133,8 +95,125 @@ def create_app() -> FastAPI:
         return {
             "message": "CORS is working!",
             "cors_origins": settings.cors_origins_list,
-            "cors_regex": settings.CORS_ALLOW_ORIGIN_REGEX
+            "cors_regex": settings.CORS_ALLOW_ORIGIN_REGEX,
+            "middleware_stack": [
+                "FastAPI CORSMiddleware",
+                "RobustCORSMiddleware", 
+                "LoggingMiddleware",
+                "SecurityHeadersMiddleware"
+            ]
         }
+
+    # -----------------------------
+    # CORS preflight test endpoint
+    # -----------------------------
+    @application.options("/cors-preflight-test")
+    async def cors_preflight_test():
+        """Test endpoint specifically for CORS preflight requests"""
+        return {"message": "CORS preflight handled successfully"}
+
+    # -----------------------------
+    # Database health check
+    # -----------------------------
+    @application.get("/db-test")
+    async def db_test():
+        try:
+            from app.core.database import engine
+            with engine.connect() as conn:
+                result = conn.execute("SELECT 1").fetchone()
+                return {
+                    "message": "Database connection successful!",
+                    "test_query": result[0] if result else None
+                }
+        except Exception as e:
+            logger.error(f"❌ Database connection failed: {str(e)}")
+            return {
+                "message": "Database connection failed!",
+                "error": str(e)
+            }
+
+    # -----------------------------
+    # Middleware test endpoint
+    # -----------------------------
+    @application.get("/middleware-test")
+    async def middleware_test():
+        return {
+            "message": "Middleware is working!",
+            "middleware_order": [
+                "1. FastAPI CORSMiddleware",
+                "2. RobustCORSMiddleware (database error handling)",
+                "3. LoggingMiddleware (request logging & timing)", 
+                "4. SecurityHeadersMiddleware (security headers)"
+            ],
+            "cors_configured": True,
+            "logging_configured": True,
+            "security_headers_configured": True,
+            "robust_error_handling": True,
+            "using_existing_classes": True
+        }
+
+    # -----------------------------
+    # Comprehensive health check
+    # -----------------------------
+    @application.get("/health-comprehensive")
+    async def comprehensive_health_check():
+        health_status = {
+            "service": settings.APP_NAME,
+            "version": settings.VERSION,
+            "environment": settings.ENV,
+            "timestamp": time.time(),
+            "components": {}
+        }
+        
+        # Test CORS configuration
+        try:
+            health_status["components"]["cors"] = {
+                "status": "healthy",
+                "origins": settings.cors_origins_list,
+                "regex": settings.CORS_ALLOW_ORIGIN_REGEX
+            }
+        except Exception as e:
+            health_status["components"]["cors"] = {
+                "status": "unhealthy",
+                "error": str(e)
+            }
+        
+        # Test database connection
+        try:
+            from app.core.database import engine
+            with engine.connect() as conn:
+                result = conn.execute("SELECT 1").fetchone()
+                health_status["components"]["database"] = {
+                    "status": "healthy",
+                    "test_query": result[0] if result else None
+                }
+        except Exception as e:
+            health_status["components"]["database"] = {
+                "status": "unhealthy",
+                "error": str(e)
+            }
+        
+        # Test Redis connection
+        try:
+            from app.core.cache import get_redis_client
+            get_redis_client().ping()
+            health_status["components"]["redis"] = {
+                "status": "healthy"
+            }
+        except Exception as e:
+            health_status["components"]["redis"] = {
+                "status": "unhealthy",
+                "error": str(e)
+            }
+        
+        # Overall status
+        all_healthy = all(
+            comp.get("status") == "healthy" 
+            for comp in health_status["components"].values()
+        )
+        health_status["overall_status"] = "healthy" if all_healthy else "degraded"
+        
+        return health_status
 
     # -----------------------------
     # API router

@@ -6,13 +6,15 @@ substitutions:
   _SERVICE: excelai-backend
   _REGION: us-central1
   _PROJECT_ID: opt2deal-472408
-  _DB_URL: postgresql+psycopg://postgres:postgres@host:5432/excel_ai
-  _REDIS_URL: redis://host:6379/0
+  _DB_URL: postgresql+psycopg://postgres:postgres@localhost:5432/excel_ai
+  _REDIS_URL: redis://localhost:6379/0
   _SUPABASE_URL: ""
   _SUPABASE_KEY: ""
   _CHROMA_DIR: /tmp/chroma
   _CPU: "1"
   _MEM: 512Mi
+  _CORS_ORIGINS: "https://excel-ai-agent-frontend-765930447632.asia-southeast1.run.app,http://localhost:5173"
+  _CORS_REGEX: "^https://excel-ai-agent-frontend-[0-9a-z\\-]+\\.asia-southeast1\\.run\\.app$"
 
 images:
   - gcr.io/${_PROJECT_ID}/${_SERVICE}:$SHORT_SHA
@@ -39,4 +41,4 @@ steps:
       - --allow-unauthenticated
       - --cpu=${_CPU}
       - --memory=${_MEM}
-      - --set-env-vars=DATABASE_URL=${_DB_URL},REDIS_URL=${_REDIS_URL},SUPABASE_URL=${_SUPABASE_URL},SUPABASE_SERVICE_ROLE_KEY=${_SUPABASE_KEY},CHROMA_PERSIST_DIR=${_CHROMA_DIR}
+      - --set-env-vars=DATABASE_URL=${_DB_URL},REDIS_URL=${_REDIS_URL},SUPABASE_URL=${_SUPABASE_URL},SUPABASE_SERVICE_ROLE_KEY=${_SUPABASE_KEY},CHROMA_PERSIST_DIR=${_CHROMA_DIR},CORS_ALLOW_ORIGINS=${_CORS_ORIGINS},CORS_ALLOW_ORIGIN_REGEX=${_CORS_REGEX}

@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
 from app.models.schemas.auth import Login, Token
@@ -9,6 +10,16 @@ from app.api.dependencies.database import get_db
 
 
 router = APIRouter()
+
+
+
+
+@router.get("/test")
+async def auth_test():
+    """Simple test endpoint for auth router"""
+    return {"message": "Auth router is working!", "status": "ok"}
+
+
 
 
 @router.post("/login", response_model=Token)
