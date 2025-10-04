@@ -16,7 +16,7 @@ xlrd==2.0.1
 numpy==2.1.2
 pandas==2.2.3
 supabase==2.10.0
-passlib[bcrypt]==1.7.4
+passlib[bcrypt,argon2]==1.7.4
 chromadb==0.5.11
 sentence-transformers==3.2.1
 google-generativeai==0.8.3

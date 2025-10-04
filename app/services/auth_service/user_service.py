@@ -4,7 +4,7 @@ from typing import Optional
 
 from app.models.database.user import User
 from app.models.schemas.user import UserCreate, UserRead
-from app.services.auth_service.password_manager import hash_password, verify_password
+from app.services.auth_service.secure_password_manager import hash_password, verify_password, validate_password, PasswordValidationError
 
 
 class UserService:
@@ -17,6 +17,11 @@ class UserService:
         existing_user = self.get_user_by_email(user_data.email)
         if existing_user:
             raise ValueError("User with this email already exists")
+        
+        # Validate password strength
+        is_valid, errors = validate_password(user_data.password)
+        if not is_valid:
+            raise ValueError(f"Password validation failed: {'; '.join(errors)}")
         
         # Hash the password
         hashed_password = hash_password(user_data.password)
@@ -70,7 +75,45 @@ class UserService:
         if not user:
             return False
         
+        # Validate new password
+        is_valid, errors = validate_password(new_password)
+        if not is_valid:
+            raise ValueError(f"Password validation failed: {'; '.join(errors)}")
+        
         user.hashed_password = hash_password(new_password)
+        self.db.commit()
+        return True
+    
+    def update_user_password_by_email(self, email: str, new_password: str) -> bool:
+        """Update user password by email"""
+        user = self.get_user_by_email(email)
+        if not user:
+            return False
+        
+        # Validate new password
+        is_valid, errors = validate_password(new_password)
+        if not is_valid:
+            raise ValueError(f"Password validation failed: {'; '.join(errors)}")
+        
+        user.hashed_password = hash_password(new_password)
+        self.db.commit()
+        return True
+    
+    def migrate_user_password(self, user_id: int, old_password: str) -> bool:
+        """
+        Migrate a user's password from old hash format to new secure format.
+        This is useful for updating users with legacy password hashes.
+        """
+        user = self.get_user_by_id(user_id)
+        if not user:
+            return False
+        
+        # Verify the old password first
+        if not verify_password(old_password, user.hashed_password):
+            return False
+        
+        # Update to new secure hash
+        user.hashed_password = hash_password(old_password)
         self.db.commit()
         return True
 

@@ -1,47 +1,69 @@
-from passlib.context import CryptContext
-import hashlib
+"""
+DEPRECATED: This module is deprecated. Use secure_password_manager.py instead.
 
+This module is kept for backward compatibility only.
+All new code should use the SecurePasswordManager from secure_password_manager.py.
+"""
 
-# Primary: bcrypt for hashing, with SHA-256 pre-hashing to avoid 72-byte limit
-_bcrypt_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
+import warnings
+from .secure_password_manager import (
+    hash_password as _secure_hash_password,
+    verify_password as _secure_verify_password,
+    validate_password as _secure_validate_password,
+    needs_update as _secure_needs_update,
+    generate_secure_password as _secure_generate_password
+)
 
-# Fallback reader for any existing $bcrypt-sha256$ hashes that might exist
-_bcrypt_sha256_ctx = CryptContext(schemes=["bcrypt_sha256"], deprecated="auto")
-
-
-def _sha256_hex(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+# Issue deprecation warning
+warnings.warn(
+    "password_manager.py is deprecated. Use secure_password_manager.py instead.",
+    DeprecationWarning,
+    stacklevel=2
+)
 
 
 def hash_password(password: str) -> str:
-    # Always pre-hash with SHA-256, then bcrypt the hex digest
-    prehashed = _sha256_hex(password)
-    return _bcrypt_ctx.hash(prehashed)
+    """
+    Hash a password using the secure password manager.
+    
+    DEPRECATED: Use secure_password_manager.hash_password() instead.
+    """
+    return _secure_hash_password(password)
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    # 1) If stored hash is bcrypt_sha256 format, let passlib verify it directly
-    if hashed_password.startswith("$bcrypt-sha256$"):
-        try:
-            return _bcrypt_sha256_ctx.verify(plain_password, hashed_password)
-        except Exception:
-            return False
+    """
+    Verify a password against its hash.
+    
+    DEPRECATED: Use secure_password_manager.verify_password() instead.
+    """
+    return _secure_verify_password(plain_password, hashed_password)
 
-    # 2) Try our new scheme: bcrypt of SHA-256 hex
-    try:
-        prehashed = _sha256_hex(plain_password)
-        if _bcrypt_ctx.verify(prehashed, hashed_password):
-            return True
-    except Exception:
-        pass
 
-    # 3) Legacy fallback: try verifying raw password against bcrypt (only if <=72 bytes)
-    try:
-        if len(plain_password.encode("utf-8")) <= 72:
-            return _bcrypt_ctx.verify(plain_password, hashed_password)
-    except Exception:
-        pass
+def validate_password(password: str):
+    """
+    Validate password strength.
+    
+    DEPRECATED: Use secure_password_manager.validate_password() instead.
+    """
+    return _secure_validate_password(password)
 
-    return False
+
+def needs_update(hashed_password: str) -> bool:
+    """
+    Check if a password hash needs updating.
+    
+    DEPRECATED: Use secure_password_manager.needs_update() instead.
+    """
+    return _secure_needs_update(hashed_password)
+
+
+def generate_secure_password(length: int = 16) -> str:
+    """
+    Generate a secure random password.
+    
+    DEPRECATED: Use secure_password_manager.generate_secure_password() instead.
+    """
+    return _secure_generate_password(length)
 
 
