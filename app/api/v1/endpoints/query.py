@@ -7,6 +7,7 @@ from app.api.dependencies.database import get_db
 from app.api.dependencies.rate_limit import rate_limit
 from app.api.dependencies.auth import get_current_user
 from app.services.query_engine.service import answer_question
+from app.services.query_engine.confidence_calculator import confidence_calculator
 from app.core.cache import get_redis_client
 from app.utils.helpers.part_number import (
     PART_NUMBER_CONFIG,
@@ -229,6 +230,20 @@ async def search_part_number(req: PartNumberSearchRequest, db: Session = Depends
                     total_quantity = int(stats[3]) if stats[3] is not None else 0
 
                     for row in matching_rows:
+                        # Calculate confidence score
+                        db_record = {
+                            "part_number": row[6] or "N/A",
+                            "item_description": row[5] or "N/A",
+                            "manufacturer": "N/A"  # Not available in this query
+                        }
+                        
+                        confidence_data = confidence_calculator.calculate_confidence(
+                            search_part=req.part_number,
+                            search_name="",  # Not available in single search
+                            search_manufacturer="",  # Not available in single search
+                            db_record=db_record
+                        )
+                        
                         companies.append({
                             "company_name": row[0] or "N/A",
                             "contact_details": row[1] or "N/A",
@@ -241,6 +256,10 @@ async def search_part_number(req: PartNumberSearchRequest, db: Session = Depends
                             "secondary_buyer": row[8] or "N/A",
                             "secondary_buyer_contact": row[9] or "N/A",
                             "secondary_buyer_email": row[10] or "N/A",
+                            "confidence": confidence_data["confidence"],
+                            "match_type": confidence_data["match_type"],
+                            "match_status": confidence_data["match_status"],
+                            "confidence_breakdown": confidence_data["breakdown"]
                         })
                     break
             except Exception as e:  # pragma: no cover
@@ -294,6 +313,21 @@ async def search_part_number(req: PartNumberSearchRequest, db: Session = Depends
                     if price > max_price:
                         max_price = price
                     total_quantity += qty
+                    
+                    # Calculate confidence score for fallback results
+                    db_record = {
+                        "part_number": r[6] or "N/A",
+                        "item_description": r[5] or "N/A",
+                        "manufacturer": "N/A"  # Not available in this query
+                    }
+                    
+                    confidence_data = confidence_calculator.calculate_confidence(
+                        search_part=req.part_number,
+                        search_name="",  # Not available in single search
+                        search_manufacturer="",  # Not available in single search
+                        db_record=db_record
+                    )
+                    
                     companies.append({
                         "company_name": r[0] or "N/A",
                         "contact_details": r[1] or "N/A",
@@ -306,6 +340,10 @@ async def search_part_number(req: PartNumberSearchRequest, db: Session = Depends
                         "secondary_buyer": r[8] or "N/A",
                         "secondary_buyer_contact": r[9] or "N/A",
                         "secondary_buyer_email": r[10] or "N/A",
+                        "confidence": confidence_data["confidence"],
+                        "match_type": confidence_data["match_type"],
+                        "match_status": confidence_data["match_status"],
+                        "confidence_breakdown": confidence_data["breakdown"]
                     })
         
         size = max(1, min(2000, int(req.page_size or 50)))

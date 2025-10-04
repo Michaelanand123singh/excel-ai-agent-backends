@@ -90,7 +90,7 @@ async def bulk_excel_search(
         # Build list of parsed part numbers
         parsed_parts = [p.part_number for p in user_parts if isinstance(p.part_number, str) and p.part_number.strip()]
         total_parts = len(user_parts)
-
+        
         # Prefer Elasticsearch bulk search (same as textarea flow) for consistency
         es_results_map: Dict[str, Any] = {}
         try:
@@ -136,10 +136,13 @@ async def bulk_excel_search(
                         'secondary_buyer_contact': top.get('secondary_buyer_contact', 'N/A'),
                         'secondary_buyer_email': top.get('secondary_buyer_email', 'N/A'),
                     }
+                    
+                    # Use confidence scores from Elasticsearch instead of recalculating
                     search_result = {
-                        'match_status': 'found',
-                        'match_type': es_entry.get('match_type', 'bulk_optimized'),
-                        'confidence': 100.0,
+                        'match_status': top.get('match_status', 'partial'),
+                        'match_type': top.get('match_type', 'elasticsearch'),
+                        'confidence': top.get('confidence', 0.0),
+                        'confidence_breakdown': top.get('confidence_breakdown', {}),
                         'database_record': db_record,
                         'price_calculation': {
                             'unit_price': db_record['unit_price'],
@@ -201,7 +204,8 @@ async def bulk_excel_search(
                         confidence=0.0,
                         database_record={},
                         price_calculation={"unit_price": 0.0, "total_cost": 0.0, "available_quantity": 0},
-                        search_time_ms=0.0
+                        search_time_ms=0.0,
+                        confidence_breakdown=None
                     )
                 results.append(BulkSearchResult(user_data={
                     'part_number': up.part_number,
@@ -214,41 +218,47 @@ async def bulk_excel_search(
         
         processing_time = (time.perf_counter() - start_time) * 1000
         
-        # Prepare response
+        # Prepare response in the same format as text-based bulk search
+        # Convert results to the expected format: Record<string, ApiPartSearchResult | { error: string }>
+        results_dict = {}
+        
+        for result in results:
+            part_number = result.user_data["part_number"]
+            
+            if result.search_result.match_status == "not_found":
+                results_dict[part_number] = {
+                    "error": "No matches found"
+                }
+            else:
+                # Convert to ApiPartSearchResult format
+                # Add confidence data to the company record
+                company_record = result.search_result.database_record.copy()
+                company_record.update({
+                    "confidence": result.search_result.confidence,
+                    "match_type": result.search_result.match_type,
+                    "match_status": result.search_result.match_status,
+                    "confidence_breakdown": result.search_result.confidence_breakdown
+                })
+                
+                results_dict[part_number] = {
+                    "part_number": part_number,
+                    "total_matches": 1 if result.search_result.match_status in ["found", "partial"] else 0,
+                    "companies": [company_record] if result.search_result.match_status in ["found", "partial"] else [],
+                    "search_mode": search_mode,
+                    "match_type": result.search_result.match_type,
+                    "latency_ms": result.search_result.search_time_ms
+                }
+        
         response = {
+            "results": results_dict,
+            "total_parts": total_parts,
+            "latency_ms": int(processing_time),
+            "file_id": file_id,
             "upload_summary": {
-                "total_parts": total_parts,
                 "found_matches": found_matches,
                 "partial_matches": partial_matches,
                 "no_matches": no_matches,
-                "processing_time_ms": int(processing_time),
                 "parse_errors": parse_errors
-            },
-            "results": [
-                {
-                    "user_data": {
-                        "part_number": result.user_data["part_number"],
-                        "part_name": result.user_data["part_name"],
-                        "quantity": result.user_data["quantity"],
-                        "manufacturer_name": result.user_data["manufacturer_name"],
-                        "row_index": result.user_data["row_index"]
-                    },
-                    "search_result": {
-                        "match_status": result.search_result.match_status,
-                        "match_type": result.search_result.match_type,
-                        "confidence": result.search_result.confidence,
-                        "database_record": result.search_result.database_record,
-                        "price_calculation": result.search_result.price_calculation,
-                        "search_time_ms": result.search_result.search_time_ms
-                    },
-                    "processing_errors": result.processing_errors
-                }
-                for result in results
-            ],
-            "file_info": {
-                "filename": file.filename,
-                "file_size_bytes": len(content),
-                "search_mode": search_mode
             }
         }
         

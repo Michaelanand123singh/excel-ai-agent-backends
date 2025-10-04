@@ -37,6 +37,7 @@ class SearchResult:
     database_record: Dict[str, Any]
     price_calculation: Dict[str, Any]
     search_time_ms: float
+    confidence_breakdown: Optional[Dict[str, Any]] = None  # Optional confidence breakdown
 
 
 @dataclass
@@ -97,7 +98,8 @@ class MultiFieldSearchEngine:
             confidence=0.0,
             database_record={},
             price_calculation={"unit_price": 0.0, "total_cost": 0.0, "available_quantity": 0},
-            search_time_ms=(time.perf_counter() - start_time) * 1000
+            search_time_ms=(time.perf_counter() - start_time) * 1000,
+            confidence_breakdown=None
         )
     
     def _search_exact_part_number(self, part_number: str, part_number_norm: str, 
@@ -361,7 +363,8 @@ class MultiFieldSearchEngine:
             confidence=0.0,
             database_record={},
             price_calculation={"unit_price": 0.0, "total_cost": 0.0, "available_quantity": 0},
-            search_time_ms=0.0
+            search_time_ms=0.0,
+            confidence_breakdown=None
         )
     
     def _format_search_result(self, db_result: Any, match_status: str, 

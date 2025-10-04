@@ -228,6 +228,17 @@ class ElasticsearchBulkSearch:
                     
                     for hit in hits:
                         source = hit['_source']
+                        
+                        # Calculate confidence score using the same logic as single search
+                        from app.services.query_engine.confidence_calculator import confidence_calculator
+                        
+                        confidence_data = confidence_calculator.calculate_confidence(
+                            search_part=part,
+                            search_name=part,  # Using part number as search name for bulk search
+                            search_manufacturer="",  # No manufacturer search in bulk
+                            db_record=source
+                        )
+                        
                         company_data = {
                             "company_name": source.get("company_name", "N/A"),
                             "contact_details": source.get("contact_details", "N/A"),
@@ -239,7 +250,11 @@ class ElasticsearchBulkSearch:
                             "uqc": source.get("uqc", "N/A"),
                             "secondary_buyer": source.get("secondary_buyer", "N/A"),
                             "secondary_buyer_contact": source.get("secondary_buyer_contact", "N/A"),
-                            "secondary_buyer_email": source.get("secondary_buyer_email", "N/A")
+                            "secondary_buyer_email": source.get("secondary_buyer_email", "N/A"),
+                            "confidence": confidence_data["confidence"],
+                            "match_type": confidence_data["match_type"],
+                            "match_status": confidence_data["match_status"],
+                            "confidence_breakdown": confidence_data["breakdown"]
                         }
                         companies.append(company_data)
                     
