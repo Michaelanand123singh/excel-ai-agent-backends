@@ -378,6 +378,23 @@ async def execute_single_query_bulk_search(
         
         # Add company data
         # Column order: search_part_number, match_type, similarity_score, company_name, contact_details, email, quantity, unit_price, item_description, part_number, uqc, secondary_buyer, secondary_buyer_contact, secondary_buyer_email
+        
+        # Calculate confidence score using the same logic as single search
+        from app.services.query_engine.confidence_calculator import confidence_calculator
+        
+        db_record = {
+            "part_number": row[9] or "N/A",
+            "item_description": row[8] or "N/A",
+            "manufacturer": ""  # Not available in this query
+        }
+        
+        confidence_data = confidence_calculator.calculate_confidence(
+            search_part=part_num,
+            search_name=part_num,  # Using part number as search name for bulk search
+            search_manufacturer="",  # No manufacturer search in bulk
+            db_record=db_record
+        )
+        
         company_data = {
             "company_name": row[3] or "N/A",
             "contact_details": row[4] or "N/A",
@@ -389,7 +406,11 @@ async def execute_single_query_bulk_search(
             "uqc": row[10] or "N/A",
             "secondary_buyer": row[11] or "N/A",
             "secondary_buyer_contact": row[12] or "N/A",
-            "secondary_buyer_email": row[13] or "N/A"
+            "secondary_buyer_email": row[13] or "N/A",
+            "confidence": confidence_data["confidence"],
+            "match_type": confidence_data["match_type"],
+            "match_status": confidence_data["match_status"],
+            "confidence_breakdown": confidence_data["breakdown"]
         }
         
         grouped_results[part_num]["companies"].append(company_data)
