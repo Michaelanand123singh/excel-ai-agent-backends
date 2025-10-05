@@ -15,6 +15,7 @@ from app.api.dependencies.database import get_db
 from app.api.dependencies.auth import get_current_user
 from app.services.data_processor.bulk_excel_parser import BulkExcelParser, BulkSearchConfig, UserPartData
 from app.services.data_processor.multi_field_search import MultiFieldSearchEngine, BulkSearchResult, SearchResult
+from app.utils.helpers.part_number import normalize
 from app.core.cache import get_redis_client
 
 router = APIRouter()
@@ -99,8 +100,8 @@ async def bulk_excel_search(
                 'file_id': file_id,
                 'part_numbers': parsed_parts,
                 'page': 1,
-                'page_size': 3,
-                'show_all': False,
+                'page_size': 10,  # Increased to match single search behavior
+                'show_all': True,  # Show all matches including low confidence
                 'search_mode': search_mode,
             }
             es_resp = await search_part_number_bulk_elasticsearch(es_payload, db, user)
@@ -161,17 +162,32 @@ async def bulk_excel_search(
                     found_matches += 1
                     continue
 
-            # If no ES result, optionally fallback to multi-field search for this row
+            # If no ES result, fallback to part number only search for this row
             try:
                 if 'search_engine' not in locals():
                     search_engine = MultiFieldSearchEngine(db, table_name)
-                sr = search_engine.search_single_part({
-                    'part_number': up.part_number,
-                    'part_name': up.part_name,
-                    'manufacturer_name': up.manufacturer_name,
-                    'quantity': up.quantity
-                }, search_mode)
-                if sr and sr.match_status != 'not_found':
+                
+                # Use only part number strategies to avoid non-part-number matches
+                sr = search_engine._search_exact_part_number(
+                    up.part_number, 
+                    normalize(up.part_number, 2) if up.part_number else "",
+                    normalize(up.part_number, 3) if up.part_number else "",
+                    "", "", up.quantity, search_mode
+                )
+                
+                # If exact search fails, try fuzzy part number search
+                if not sr or sr.get("match_status") == "not_found":
+                    sr = search_engine._search_fuzzy_part_number(
+                        up.part_number,
+                        normalize(up.part_number, 2) if up.part_number else "",
+                        normalize(up.part_number, 3) if up.part_number else "",
+                        "", "", up.quantity, search_mode
+                    )
+                
+                # Convert to SearchResult if we have a match
+                if sr and sr.get("match_status") != "not_found":
+                    sr["search_time_ms"] = 0  # Set search time
+                    sr = SearchResult(**sr)
                     results.append(BulkSearchResult(user_data={
                         'part_number': up.part_number,
                         'part_name': up.part_name,

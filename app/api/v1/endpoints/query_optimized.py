@@ -395,6 +395,12 @@ async def execute_single_query_bulk_search(
             db_record=db_record
         )
         
+        # Only include results with meaningful part number matching
+        # Check if there's any part number similarity (even partial)
+        part_score = confidence_data["breakdown"]["part_number"]["score"]
+        if part_score < 1.0:  # Only exclude if absolutely no part number similarity
+            continue
+        
         company_data = {
             "company_name": row[3] or "N/A",
             "contact_details": row[4] or "N/A",

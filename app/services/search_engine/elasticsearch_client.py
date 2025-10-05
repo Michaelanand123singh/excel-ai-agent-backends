@@ -167,7 +167,7 @@ class ElasticsearchBulkSearch:
                 # Add index specification
                 msearch_body.append({"index": self.index_name})
                 
-                # Add search query
+                # Add search query - Focus on part number matching only
                 search_query = {
                     "query": {
                         "bool": {
@@ -187,20 +187,37 @@ class ElasticsearchBulkSearch:
                                     "match": {
                                         "part_number": {
                                             "query": part,
-                                            "boost": 2.0
+                                            "boost": 2.0,
+                                            "fuzziness": "AUTO"
                                         }
                                     }
                                 },
                                 {
-                                    "match": {
-                                        "item_description": {
-                                            "query": part,
+                                    "wildcard": {
+                                        "part_number": {
+                                            "value": f"*{part}*",
                                             "boost": 1.0
+                                        }
+                                    }
+                                },
+                                {
+                                    "wildcard": {
+                                        "part_number": {
+                                            "value": f"{part}*",
+                                            "boost": 1.5
+                                        }
+                                    }
+                                },
+                                {
+                                    "wildcard": {
+                                        "part_number": {
+                                            "value": f"*{part}",
+                                            "boost": 1.5
                                         }
                                     }
                                 }
                             ],
-                            "minimum_should_match": 1
+                            "minimum_should_match": 1  # Require at least one part number match
                         }
                     },
                     "size": limit_per_part,
@@ -238,6 +255,12 @@ class ElasticsearchBulkSearch:
                             search_manufacturer="",  # No manufacturer search in bulk
                             db_record=source
                         )
+                        
+                        # Only include results with meaningful part number matching
+                        # Check if there's any part number similarity (even partial)
+                        part_score = confidence_data["breakdown"]["part_number"]["score"]
+                        if part_score < 1.0:  # Only exclude if absolutely no part number similarity
+                            continue
                         
                         company_data = {
                             "company_name": source.get("company_name", "N/A"),

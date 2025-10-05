@@ -56,7 +56,7 @@ async def search_part_number_bulk_elasticsearch(
         result = es_client.bulk_search(
             part_numbers=part_numbers,
             file_id=file_id,
-            limit_per_part=3
+            limit_per_part=10  # Increased to match single search behavior
         )
         
         total_time = (time.perf_counter() - start_time) * 1000
