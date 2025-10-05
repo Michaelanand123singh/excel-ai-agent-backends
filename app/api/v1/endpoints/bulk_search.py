@@ -95,6 +95,7 @@ async def bulk_excel_search(
         # Prefer Elasticsearch bulk search (same as textarea flow) for consistency
         es_results_map: Dict[str, Any] = {}
         try:
+            # Use the same endpoint as text-based bulk search for consistency
             from app.api.v1.endpoints.query_elasticsearch import search_part_number_bulk_elasticsearch
             es_payload = {
                 'file_id': file_id,
@@ -107,7 +108,8 @@ async def bulk_excel_search(
             es_resp = await search_part_number_bulk_elasticsearch(es_payload, db, user)
             # es_resp['results'] is a mapping part_number -> { companies: [...] }
             es_results_map = (es_resp or {}).get('results', {})
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Elasticsearch bulk search failed: {e}")
             # Fallback to multi-field DB search if ES fails
             search_engine = MultiFieldSearchEngine(db, table_name)
             es_results_map = {}
@@ -123,43 +125,48 @@ async def bulk_excel_search(
             if es_entry and isinstance(es_entry, dict):
                 companies = es_entry.get('companies') or []
                 if companies:
-                    top = companies[0]
-                    db_record = {
-                        'company_name': top.get('company_name', 'N/A'),
-                        'contact_details': top.get('contact_details', 'N/A'),
-                        'email': top.get('email', 'N/A'),
-                        'quantity': top.get('quantity', 0),
-                        'unit_price': top.get('unit_price', 0.0),
-                        'item_description': top.get('item_description', 'N/A'),
-                        'part_number': top.get('part_number', pn),
-                        'uqc': top.get('uqc', 'N/A'),
-                        'secondary_buyer': top.get('secondary_buyer', 'N/A'),
-                        'secondary_buyer_contact': top.get('secondary_buyer_contact', 'N/A'),
-                        'secondary_buyer_email': top.get('secondary_buyer_email', 'N/A'),
-                    }
-                    
-                    # Use confidence scores from Elasticsearch instead of recalculating
-                    search_result = {
-                        'match_status': top.get('match_status', 'partial'),
-                        'match_type': top.get('match_type', 'elasticsearch'),
-                        'confidence': top.get('confidence', 0.0),
-                        'confidence_breakdown': top.get('confidence_breakdown', {}),
-                        'database_record': db_record,
-                        'price_calculation': {
-                            'unit_price': db_record['unit_price'],
-                            'total_cost': float(db_record['unit_price'] or 0) * float(up.quantity or 0),
-                            'available_quantity': db_record.get('quantity', 0),
-                        },
-                        'search_time_ms': es_entry.get('latency_ms', 0)
-                    }
-                    results.append(BulkSearchResult(user_data={
-                        'part_number': up.part_number,
-                        'part_name': up.part_name,
-                        'quantity': up.quantity,
-                        'manufacturer_name': up.manufacturer_name,
-                        'row_index': up.row_index
-                    }, search_result=SearchResult(**search_result), processing_errors=[]))
-                    found_matches += 1
+                    # Process ALL companies, not just the first one
+                    for company in companies:
+                        db_record = {
+                            'company_name': company.get('company_name', 'N/A'),
+                            'contact_details': company.get('contact_details', 'N/A'),
+                            'email': company.get('email', 'N/A'),
+                            'quantity': company.get('quantity', 0),
+                            'unit_price': company.get('unit_price', 0.0),
+                            'item_description': company.get('item_description', 'N/A'),
+                            'part_number': company.get('part_number', pn),
+                            'uqc': company.get('uqc', 'N/A'),
+                            'secondary_buyer': company.get('secondary_buyer', 'N/A'),
+                            'secondary_buyer_contact': company.get('secondary_buyer_contact', 'N/A'),
+                            'secondary_buyer_email': company.get('secondary_buyer_email', 'N/A'),
+                        }
+                        
+                        # Use confidence scores from Elasticsearch instead of recalculating
+                        search_result = {
+                            'match_status': company.get('match_status', 'partial'),
+                            'match_type': company.get('match_type', 'elasticsearch'),
+                            'confidence': company.get('confidence', 0.0),
+                            'confidence_breakdown': company.get('confidence_breakdown', {}),
+                            'database_record': db_record,
+                            'price_calculation': {
+                                'unit_price': db_record['unit_price'],
+                                'total_cost': float(db_record['unit_price'] or 0) * float(up.quantity or 0),
+                                'available_quantity': db_record.get('quantity', 0),
+                            },
+                            'search_time_ms': es_entry.get('latency_ms', 0)
+                        }
+                        results.append(BulkSearchResult(user_data={
+                            'part_number': up.part_number,
+                            'part_name': up.part_name,
+                            'quantity': up.quantity,
+                            'manufacturer_name': up.manufacturer_name,
+                            'row_index': up.row_index
+                        }, search_result=SearchResult(**search_result), processing_errors=[]))
+                        
+                        if company.get('match_status') == 'found':
+                            found_matches += 1
+                        else:
+                            partial_matches += 1
                     continue
 
             # If no ES result, fallback to part number only search for this row
@@ -238,31 +245,43 @@ async def bulk_excel_search(
         # Convert results to the expected format: Record<string, ApiPartSearchResult | { error: string }>
         results_dict = {}
         
+        # Group results by part number
+        part_results = {}
         for result in results:
             part_number = result.user_data["part_number"]
+            if part_number not in part_results:
+                part_results[part_number] = []
+            part_results[part_number].append(result)
+        
+        # Convert grouped results to the expected format
+        for part_number, part_result_list in part_results.items():
+            # Filter out not_found results
+            valid_results = [r for r in part_result_list if r.search_result.match_status != "not_found"]
             
-            if result.search_result.match_status == "not_found":
+            if not valid_results:
                 results_dict[part_number] = {
                     "error": "No matches found"
                 }
             else:
-                # Convert to ApiPartSearchResult format
-                # Add confidence data to the company record
-                company_record = result.search_result.database_record.copy()
-                company_record.update({
-                    "confidence": result.search_result.confidence,
-                    "match_type": result.search_result.match_type,
-                    "match_status": result.search_result.match_status,
-                    "confidence_breakdown": result.search_result.confidence_breakdown
-                })
+                # Convert all valid results to company records
+                companies = []
+                for result in valid_results:
+                    company_record = result.search_result.database_record.copy()
+                    company_record.update({
+                        "confidence": result.search_result.confidence,
+                        "match_type": result.search_result.match_type,
+                        "match_status": result.search_result.match_status,
+                        "confidence_breakdown": result.search_result.confidence_breakdown
+                    })
+                    companies.append(company_record)
                 
                 results_dict[part_number] = {
                     "part_number": part_number,
-                    "total_matches": 1 if result.search_result.match_status in ["found", "partial"] else 0,
-                    "companies": [company_record] if result.search_result.match_status in ["found", "partial"] else [],
+                    "total_matches": len(companies),
+                    "companies": companies,
                     "search_mode": search_mode,
-                    "match_type": result.search_result.match_type,
-                    "latency_ms": result.search_result.search_time_ms
+                    "match_type": valid_results[0].search_result.match_type,
+                    "latency_ms": valid_results[0].search_result.search_time_ms
                 }
         
         response = {
