@@ -220,62 +220,67 @@ class UnifiedSearchEngine:
         Search using Elasticsearch for high performance with large datasets
         """
         try:
-            # Use Elasticsearch bulk search with unlimited results support
+            # Use Elasticsearch bulk search with chunking to avoid oversized msearch bodies
             # For unlimited results, we'll use a very high limit and rely on pagination
             limit_per_part = 100000 if show_all else page_size * 50  # Support up to 100k results per part
-            
-            es_result = self.es_client.bulk_search(
-                part_numbers=part_numbers,
-                file_id=self.file_id,
-                limit_per_part=limit_per_part
-            )
-            
-            # Convert Elasticsearch results to unified format
-            results = {}
-            for part_number in part_numbers:
-                if part_number in es_result.get('results', {}):
-                    es_part_result = es_result['results'][part_number]
-                    companies = es_part_result.get('companies', [])
-                    
-                    # Apply pagination if needed
-                    if not show_all and len(companies) > page_size:
-                        start_idx = (page - 1) * page_size
-                        end_idx = start_idx + page_size
-                        companies = companies[start_idx:end_idx]
-                    
-                    # Calculate price summary
-                    prices = [c.get('unit_price', 0) for c in companies if c.get('unit_price', 0) > 0]
-                    quantities = [c.get('quantity', 0) for c in companies if c.get('quantity', 0) > 0]
-                    
-                    min_price = min(prices) if prices else 0.0
-                    max_price = max(prices) if prices else 0.0
-                    total_quantity = sum(quantities)
-                    
-                    results[part_number] = {
-                        "part_number": part_number,
-                        "total_matches": len(companies),
-                        "companies": companies,
-                        "price_summary": {
-                            "min_price": min_price,
-                            "max_price": max_price,
-                            "total_quantity": total_quantity
-                        },
-                        "page": page,
-                        "page_size": page_size,
-                        "total_pages": 1 if show_all else int((len(companies) + page_size - 1) // page_size),
-                        "message": f"Found {len(companies)} companies with part number '{part_number}'. Price range: ₹{min_price:.2f} - ₹{max_price:.2f}",
-                        "cached": False,
-                        "latency_ms": 0,  # Will be set by caller
-                        "table_name": self.table_name,
-                        "show_all": show_all,
-                        "search_mode": search_mode,
-                        "match_type": "elasticsearch_comprehensive"
-                    }
-                else:
-                    results[part_number] = self._create_empty_result(part_number, f"No matches found for part number '{part_number}'")
-            
+
+            # Chunk part numbers to keep each ES msearch small and fast
+            chunk_size = 300
+            aggregated: Dict[str, Any] = {"results": {}, "total_parts": len(part_numbers)}
+
+            for i in range(0, len(part_numbers), chunk_size):
+                chunk = part_numbers[i:i + chunk_size]
+                es_result = self.es_client.bulk_search(
+                    part_numbers=chunk,
+                    file_id=self.file_id,
+                    limit_per_part=limit_per_part
+                )
+
+                # Merge chunk results
+                for part_number in chunk:
+                    if part_number in es_result.get('results', {}):
+                        es_part_result = es_result['results'][part_number]
+                        companies = es_part_result.get('companies', [])
+
+                        # Apply pagination if needed
+                        if not show_all and len(companies) > page_size:
+                            start_idx = (page - 1) * page_size
+                            end_idx = start_idx + page_size
+                            companies = companies[start_idx:end_idx]
+
+                        # Calculate price summary
+                        prices = [c.get('unit_price', 0) for c in companies if c.get('unit_price', 0) > 0]
+                        quantities = [c.get('quantity', 0) for c in companies if c.get('quantity', 0) > 0]
+
+                        min_price = min(prices) if prices else 0.0
+                        max_price = max(prices) if prices else 0.0
+                        total_quantity = sum(quantities)
+
+                        aggregated["results"][part_number] = {
+                            "part_number": part_number,
+                            "total_matches": len(companies),
+                            "companies": companies,
+                            "price_summary": {
+                                "min_price": min_price,
+                                "max_price": max_price,
+                                "total_quantity": total_quantity
+                            },
+                            "page": page,
+                            "page_size": page_size,
+                            "total_pages": 1 if show_all else int((len(companies) + page_size - 1) // page_size),
+                            "message": f"Found {len(companies)} companies with part number '{part_number}'. Price range: ₹{min_price:.2f} - ₹{max_price:.2f}",
+                            "cached": False,
+                            "latency_ms": 0,  # Will be set by caller
+                            "table_name": self.table_name,
+                            "show_all": show_all,
+                            "search_mode": search_mode,
+                            "match_type": "elasticsearch_comprehensive"
+                        }
+                    else:
+                        aggregated["results"][part_number] = self._create_empty_result(part_number, f"No matches found for part number '{part_number}'")
+
             return {
-                "results": results,
+                "results": aggregated["results"],
                 "total_parts": len(part_numbers),
                 "latency_ms": 0,  # Will be set by caller
                 "search_engine": "elasticsearch"

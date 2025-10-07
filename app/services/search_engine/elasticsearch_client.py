@@ -220,6 +220,22 @@ class ElasticsearchBulkSearch:
                             "minimum_should_match": 1  # Require at least one part number match
                         }
                     },
+                    "track_total_hits": False,
+                    "_source": {
+                        "includes": [
+                            "company_name",
+                            "contact_details",
+                            "email",
+                            "quantity",
+                            "unit_price",
+                            "item_description",
+                            "part_number",
+                            "uqc",
+                            "secondary_buyer",
+                            "secondary_buyer_contact",
+                            "secondary_buyer_email"
+                        ]
+                    },
                     "size": limit_per_part,
                     "sort": [
                         {"_score": {"order": "desc"}},
