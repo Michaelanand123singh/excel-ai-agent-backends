@@ -25,11 +25,11 @@ logger = logging.getLogger(__name__)
 BULK_SEARCH_CONFIG = BulkSearchConfig(
     max_file_size_mb=50,
     batch_size=500,
-    max_results_per_part=3,
-    required_headers=["Part Number", "Part name", "Quantity", "Manufacturer name"],
+    max_results_per_part=1000,  # Increased for comprehensive results
+    required_headers=["Part Number"],  # Only require part number for basic search
     processing_timeout_seconds=30,
-    enable_manufacturer_cross_check=True,
-    confidence_threshold=0.3
+    enable_manufacturer_cross_check=False,  # Disable for basic search
+    confidence_threshold=0.1  # Lower threshold for more matches
 )
 
 
@@ -92,27 +92,22 @@ async def bulk_excel_search(
         parsed_parts = [p.part_number for p in user_parts if isinstance(p.part_number, str) and p.part_number.strip()]
         total_parts = len(user_parts)
         
-        # Prefer Elasticsearch bulk search (same as textarea flow) for consistency
-        es_results_map: Dict[str, Any] = {}
-        try:
-            # Use the same endpoint as text-based bulk search for consistency
-            from app.api.v1.endpoints.query_elasticsearch import search_part_number_bulk_elasticsearch
-            es_payload = {
-                'file_id': file_id,
-                'part_numbers': parsed_parts,
-                'page': 1,
-                'page_size': 10,  # Increased to match single search behavior
-                'show_all': True,  # Show all matches including low confidence
-                'search_mode': search_mode,
-            }
-            es_resp = await search_part_number_bulk_elasticsearch(es_payload, db, user)
-            # es_resp['results'] is a mapping part_number -> { companies: [...] }
-            es_results_map = (es_resp or {}).get('results', {})
-        except Exception as e:
-            logger.warning(f"Elasticsearch bulk search failed: {e}")
-            # Fallback to multi-field DB search if ES fails
-            search_engine = MultiFieldSearchEngine(db, table_name)
-            es_results_map = {}
+        # Use unified search engine for consistent results
+        from app.services.search_engine.unified_search_engine import UnifiedSearchEngine
+        
+        search_engine = UnifiedSearchEngine(db, table_name, file_id=file_id)
+        # Force PostgreSQL for Excel bulk search to ensure consistent results
+        search_engine.es_available = False
+        unified_result = search_engine.search_bulk_parts(
+            part_numbers=parsed_parts,
+            search_mode=search_mode,
+            page=1,
+            page_size=1000,  # Reasonable default for pagination
+            show_all=False  # Use pagination for better performance
+        )
+        
+        # Convert unified result format to expected format
+        unified_results_map = unified_result.get('results', {})
 
         results = []
         found_matches = 0
@@ -121,9 +116,9 @@ async def bulk_excel_search(
 
         for up in user_parts:
             pn = (up.part_number or '').strip()
-            es_entry = es_results_map.get(pn)
-            if es_entry and isinstance(es_entry, dict):
-                companies = es_entry.get('companies') or []
+            unified_entry = unified_results_map.get(pn)
+            if unified_entry and isinstance(unified_entry, dict):
+                companies = unified_entry.get('companies') or []
                 if companies:
                     # Process ALL companies, not just the first one
                     for company in companies:
@@ -141,10 +136,10 @@ async def bulk_excel_search(
                             'secondary_buyer_email': company.get('secondary_buyer_email', 'N/A'),
                         }
                         
-                        # Use confidence scores from Elasticsearch instead of recalculating
+                        # Use confidence scores from unified search engine
                         search_result = {
                             'match_status': company.get('match_status', 'partial'),
-                            'match_type': company.get('match_type', 'elasticsearch'),
+                            'match_type': company.get('match_type', 'unified_comprehensive'),
                             'confidence': company.get('confidence', 0.0),
                             'confidence_breakdown': company.get('confidence_breakdown', {}),
                             'database_record': db_record,
@@ -153,23 +148,31 @@ async def bulk_excel_search(
                                 'total_cost': float(db_record['unit_price'] or 0) * float(up.quantity or 0),
                                 'available_quantity': db_record.get('quantity', 0),
                             },
-                            'search_time_ms': es_entry.get('latency_ms', 0)
+                            'search_time_ms': unified_entry.get('latency_ms', 0)
                         }
-                        results.append(BulkSearchResult(user_data={
-                            'part_number': up.part_number,
-                            'part_name': up.part_name,
-                            'quantity': up.quantity,
-                            'manufacturer_name': up.manufacturer_name,
-                            'row_index': up.row_index
-                        }, search_result=SearchResult(**search_result), processing_errors=[]))
+                        try:
+                            search_result_obj = SearchResult(**search_result)
+                            results.append(BulkSearchResult(user_data={
+                                'part_number': up.part_number,
+                                'part_name': up.part_name,
+                                'quantity': up.quantity,
+                                'manufacturer_name': up.manufacturer_name,
+                                'row_index': up.row_index
+                            }, search_result=search_result_obj, processing_errors=[]))
+                        except Exception as e:
+                            logger.error(f"Error creating SearchResult for {up.part_number}: {e}")
+                            logger.error(f"Search result data: {search_result}")
+                            # Continue processing other companies
                         
                         if company.get('match_status') == 'found':
                             found_matches += 1
                         else:
                             partial_matches += 1
+                    
+                    # Skip fallback logic since we found results
                     continue
 
-            # If no ES result, fallback to part number only search for this row
+            # If no unified result, fallback to part number only search for this row
             try:
                 if 'search_engine' not in locals():
                     search_engine = MultiFieldSearchEngine(db, table_name)

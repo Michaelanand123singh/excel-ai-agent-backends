@@ -6,12 +6,12 @@ from typing import Iterable, List, Tuple
 # Central configuration for part number processing
 PART_NUMBER_CONFIG: dict = {
     "separators": ['-', '/', ',', '*', '&', '~', '.', '%'],
-    "min_similarity": 0.6,
-    "db_batch_size": 5000,
-    "token_min_overlap": 0.4,
+    "min_similarity": 0.1,  # Much lower threshold to include more matches
+    "db_batch_size": 10000,  # Increased batch size
+    "token_min_overlap": 0.2,  # Lower overlap requirement
     "format_variations": True,
     "enable_db_fuzzy": True,
-    "max_response_time_ms": 2000,
+    "max_response_time_ms": 5000,  # Increased timeout for comprehensive search
     "use_parallel_search": True,
     "precompute_normalized": True,
 }

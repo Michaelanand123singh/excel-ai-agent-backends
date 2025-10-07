@@ -152,7 +152,7 @@ class ElasticsearchBulkSearch:
             logger.error(f"❌ Failed to index data to Elasticsearch: {e}")
             return False
     
-    def bulk_search(self, part_numbers: List[str], file_id: int, limit_per_part: int = 3) -> Dict[str, Any]:
+    def bulk_search(self, part_numbers: List[str], file_id: int, limit_per_part: int = 100000) -> Dict[str, Any]:
         """Perform ultra-fast bulk search using Elasticsearch"""
         if not self.is_available():
             raise Exception("Elasticsearch not available")
@@ -256,10 +256,13 @@ class ElasticsearchBulkSearch:
                             db_record=source
                         )
                         
-                        # Only include results with meaningful part number matching
-                        # Check if there's any part number similarity (even partial)
+                        # Include all results with any meaningful similarity
+                        # Check if there's any part number or description similarity
                         part_score = confidence_data["breakdown"]["part_number"]["score"]
-                        if part_score < 1.0:  # Only exclude if absolutely no part number similarity
+                        desc_score = confidence_data["breakdown"]["description"]["score"]
+                        
+                        # Include if there's any meaningful similarity (lowered threshold)
+                        if part_score < 0.1 and desc_score < 0.1:  # Only exclude if absolutely no similarity
                             continue
                         
                         company_data = {

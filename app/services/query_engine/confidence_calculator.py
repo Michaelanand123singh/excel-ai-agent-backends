@@ -23,11 +23,11 @@ class ConfidenceCalculator:
             "exact_match_bonus": 20,  # Bonus for exact matches
             "case_insensitive_bonus": 10,  # Bonus for case-insensitive exact match
             "normalized_bonus": 15,  # Bonus for normalized exact match
-            "similarity_threshold": 0.3,  # Minimum similarity to consider
-            "description_weight": 0.3,  # Weight for description matching
-            "part_number_weight": 0.7,  # Weight for part number matching
+            "similarity_threshold": 0.1,  # Lower threshold to include more matches
+            "description_weight": 0.4,  # Increased weight for description matching
+            "part_number_weight": 0.6,  # Slightly reduced weight for part number matching
             "manufacturer_weight": 0.2,  # Weight for manufacturer matching
-            "length_penalty_factor": 0.1,  # Penalty for length differences
+            "length_penalty_factor": 0.05,  # Reduced penalty for length differences
         }
     
     def calculate_confidence(self, 
@@ -302,9 +302,9 @@ class ConfidenceCalculator:
     
     def _determine_match_status(self, overall_score: float, part_score: float) -> str:
         """Determine match status based on overall and part number scores"""
-        if overall_score >= 80:
+        if overall_score >= 70:  # Lowered threshold for "found"
             return "found"
-        elif overall_score >= 1 or part_score >= 1:
+        elif overall_score >= 0.1 or part_score >= 0.1:  # Much lower threshold for "partial"
             return "partial"
         else:
             return "not_found"

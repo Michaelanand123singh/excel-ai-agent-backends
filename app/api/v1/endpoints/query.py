@@ -30,18 +30,18 @@ class PartNumberSearchRequest(BaseModel):
     part_number: str
     file_id: int
     page: int | None = 1
-    page_size: int | None = 50
-    show_all: bool | None = False
-    search_mode: str | None = "exact"  # exact | fuzzy | hybrid
+    page_size: int | None = 1000  # Reasonable default for pagination
+    show_all: bool | None = False  # Use pagination by default for better performance
+    search_mode: str | None = "hybrid"  # Changed default to hybrid for better matching
 
 
 class BulkPartSearchRequest(BaseModel):
     file_id: int
     part_numbers: list[str]
     page: int | None = 1
-    page_size: int | None = 50
-    show_all: bool | None = False
-    search_mode: str | None = "exact"
+    page_size: int | None = 1000  # Reasonable default for pagination
+    show_all: bool | None = False  # Use pagination by default for better performance
+    search_mode: str | None = "hybrid"  # Changed default to hybrid for better matching
 
 
 @router.post("/")
@@ -70,305 +70,18 @@ async def search_part_number(req: PartNumberSearchRequest, db: Session = Depends
         if not exists:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Dataset {req.file_id} not found or not processed yet")
 
-        # Guard small inputs
-        if len((req.part_number or "").strip()) < 2:
-            return {
-                "part_number": req.part_number,
-                "total_matches": 0,
-                "companies": [],
-                "message": "Enter at least 2 characters to search",
-                "cached": False,
-                "latency_ms": int((time.perf_counter() - start_time) * 1000)
-            }
+        # Use unified search engine for consistent results
+        from app.services.search_engine.unified_search_engine import UnifiedSearchEngine
         
-        # Helpers for SQL expressions
-        def sql_strip_separators(expr: str) -> str:
-            s = expr
-            for sep in PART_NUMBER_CONFIG["separators"]:
-                s = f"REPLACE({s}, '{sep}', '')"
-            return s
-
-        def sql_strip_non_alnum(expr: str) -> str:
-            return f"REGEXP_REPLACE({expr}, '[^a-zA-Z0-9]+', '', 'g')"
-
-        q_original = req.part_number.strip()
-        q_no_seps = normalize(q_original, 2)
-        q_alnum = normalize(q_original, 3)
-
-        search_mode = (req.search_mode or "exact").lower()
-        pn_expr = '"part_number"'
-        item_desc_expr = 'CAST("Item_Description" AS TEXT)'
-
-        exact_conditions = [
-            f"LOWER({pn_expr}) = LOWER(:q_original)",
-            f"LOWER({sql_strip_separators(pn_expr)}) = LOWER(:q_no_seps)",
-            f"LOWER({sql_strip_non_alnum(pn_expr)}) = LOWER(:q_alnum)",
-        ]
-
-        like_conditions = [
-            f"{item_desc_expr} ILIKE :pattern_any",
-            f"LOWER({sql_strip_separators(item_desc_expr)}) LIKE LOWER(:pattern_no_seps)",
-            f"LOWER({sql_strip_non_alnum(item_desc_expr)}) LIKE LOWER(:pattern_alnum)",
-            f"LOWER({sql_strip_separators(pn_expr)}) LIKE LOWER(:pattern_no_seps)",
-            f"LOWER({sql_strip_non_alnum(pn_expr)}) LIKE LOWER(:pattern_alnum)",
-        ]
-
-        fuzzy_conditions = [
-            "similarity(lower(CAST(\"Item_Description\" AS TEXT)), lower(:q_original)) >= :min_sim",
-        ] if PART_NUMBER_CONFIG.get("enable_db_fuzzy", True) else []
-
-        pipelines: list[tuple[str, dict, str]] = []
-        pipelines.append((" OR ".join(exact_conditions), {
-            "q_original": q_original,
-            "q_no_seps": q_no_seps,
-            "q_alnum": q_alnum,
-        }, "exact"))
-
-        if search_mode in ("hybrid", "fuzzy"):
-            pipelines.append((" OR ".join(like_conditions), {
-                "pattern_any": f"%{q_original}%",
-                "pattern_no_seps": f"%{q_no_seps}%",
-                "pattern_alnum": f"%{q_alnum}%",
-            }, "separator_like"))
-            if fuzzy_conditions:
-                pipelines.append((" OR ".join(fuzzy_conditions), {
-                    "q_original": q_original,
-                    "min_sim": PART_NUMBER_CONFIG.get("min_similarity", 0.6),
-                }, "fuzzy_trgm"))
+        search_engine = UnifiedSearchEngine(db, table_name, file_id=req.file_id)
+        result = search_engine.search_single_part(
+            part_number=req.part_number,
+            search_mode=req.search_mode or "hybrid",
+            page=req.page or 1,
+            page_size=req.page_size or 1000,  # Reasonable default for pagination
+            show_all=req.show_all or False  # Use pagination by default for better performance
+        )
         
-        def execute_pipeline(where_sql: str, params: dict, match_type: str):
-            # Build dynamic SELECT statement based on available columns
-            def build_select_statement():
-                # Get all available columns
-                all_columns_result = db.execute(text(f"""
-                    SELECT column_name 
-                    FROM information_schema.columns 
-                    WHERE table_name = '{table_name}' 
-                    ORDER BY ordinal_position
-                """)).fetchall()
-                available_columns = [row[0] for row in all_columns_result]
-                
-                # Define column mappings with fallbacks
-                column_mappings = {
-                    'company_name': ['Potential Buyer 1', 'Company Name', 'Buyer 1', 'Company'],
-                    'contact_details': ['Potential Buyer 1 Contact Details', 'Contact Details', 'Contact', 'Phone'],
-                    'email': ['Potential Buyer 1 email id', 'Email', 'Email ID', 'Email Address'],
-                    'quantity': ['Quantity', 'Qty', 'Amount'],
-                    'unit_price': ['Unit_Price', 'Unit Price', 'Price', 'Cost'],
-                    'item_description': ['Item_Description', 'Item Description', 'Description', 'Product'],
-                    'part_number': ['part_number', 'Part Number', 'Part No', 'Part'],
-                    'uqc': ['UQC', 'Unit', 'Unit of Measure'],
-                    'secondary_buyer': ['Potential Buyer 2', 'Buyer 2', 'Secondary Buyer'],
-                    'secondary_buyer_contact': ['Potential Buyer 2 Contact Details', 'Buyer 2 Contact', 'Secondary Contact'],
-                    'secondary_buyer_email': ['Potential Buyer 2 email id', 'Buyer 2 Email', 'Secondary Email']
-                }
-                
-                select_parts = []
-                for alias, possible_columns in column_mappings.items():
-                    found_column = None
-                    for col in possible_columns:
-                        if col in available_columns:
-                            found_column = col
-                            break
-                    
-                    if found_column:
-                        select_parts.append(f'"{found_column}" as {alias}')
-                    else:
-                        # Use NULL for missing columns
-                        select_parts.append(f'NULL as {alias}')
-                
-                return ', '.join(select_parts)
-            
-            base_select = f"""
-                SELECT {build_select_statement()}
-                FROM {table_name} 
-                WHERE {where_sql}
-            """
-            order_clause = "ORDER BY \"Unit_Price\" ASC"
-            if match_type == "fuzzy_trgm":
-                order_clause = "ORDER BY similarity(lower(CAST(\"Item_Description\" AS TEXT)), lower(:q_original)) DESC, \"Unit_Price\" ASC"
-
-            stats_sql_local = f"""
-                SELECT 
-                    COUNT(*) as total_matches,
-                    MIN("Unit_Price") as min_price,
-                    MAX("Unit_Price") as max_price,
-                    SUM("Quantity") as total_quantity
-                FROM {table_name} 
-                WHERE {where_sql}
-            """
-
-            page = max(1, int(req.page or 1))
-            size = max(1, min(2000, int(req.page_size or 50)))
-            if req.show_all:
-                paged_sql = base_select + f"\n{order_clause}\nLIMIT :limit OFFSET :offset"
-                run_params = {**params, "limit": 100000, "offset": 0}
-            else:
-                offset = (page - 1) * size
-                paged_sql = base_select + f"\n{order_clause}\nLIMIT :limit OFFSET :offset"
-                run_params = {**params, "limit": size, "offset": offset}
-
-            matching_rows = db.execute(text(paged_sql), run_params).fetchall()
-            stats = db.execute(text(stats_sql_local), params).fetchone()
-            return matching_rows, stats, match_type
-        
-        companies = []
-        total_count = 0
-        min_price = 0.0
-        max_price = 0.0
-        total_quantity = 0
-        used_match_type = "none"
-
-        last_exception = None
-        for where_sql, params, match_type in pipelines:
-            try:
-                matching_rows, stats, used_match_type = execute_pipeline(where_sql, params, match_type)
-                if stats and stats[0]:
-                    total_count = stats[0] or 0
-                    min_price = float(stats[1]) if stats[1] is not None else 0.0
-                    max_price = float(stats[2]) if stats[2] is not None else 0.0
-                    total_quantity = int(stats[3]) if stats[3] is not None else 0
-
-                    for row in matching_rows:
-                        # Calculate confidence score
-                        db_record = {
-                            "part_number": row[6] or "N/A",
-                            "item_description": row[5] or "N/A",
-                            "manufacturer": "N/A"  # Not available in this query
-                        }
-                        
-                        confidence_data = confidence_calculator.calculate_confidence(
-                            search_part=req.part_number,
-                            search_name="",  # Not available in single search
-                            search_manufacturer="",  # Not available in single search
-                            db_record=db_record
-                        )
-                        
-                        companies.append({
-                            "company_name": row[0] or "N/A",
-                            "contact_details": row[1] or "N/A",
-                            "email": row[2] or "N/A",
-                            "quantity": int(row[3]) if row[3] is not None else 0,
-                            "unit_price": float(row[4]) if row[4] is not None else 0.0,
-                            "item_description": row[5] or "N/A",
-                            "part_number": row[6] or "N/A",
-                            "uqc": row[7] or "N/A",
-                            "secondary_buyer": row[8] or "N/A",
-                            "secondary_buyer_contact": row[9] or "N/A",
-                            "secondary_buyer_email": row[10] or "N/A",
-                            "confidence": confidence_data["confidence"],
-                            "match_type": confidence_data["match_type"],
-                            "match_status": confidence_data["match_status"],
-                            "confidence_breakdown": confidence_data["breakdown"]
-                        })
-                    break
-            except Exception as e:  # pragma: no cover
-                last_exception = e
-                continue
-
-        # Fallback python-side scoring
-        if total_count == 0 and search_mode in ("hybrid", "fuzzy"):
-            tokens = separator_tokenize(q_original)
-            tokens = [t for t in tokens if t]
-            if tokens:
-                clauses = ["CAST(\"Item_Description\" AS TEXT) ILIKE :tok_" + str(i) for i, _ in enumerate(tokens)]
-                where = " OR ".join(clauses)
-                params = {"tok_" + str(i): f"%{t}%" for i, t in enumerate(tokens)}
-                limit = min(1000, PART_NUMBER_CONFIG.get("db_batch_size", 5000))
-                rows = db.execute(text(f"""
-                    SELECT 
-                        "Potential Buyer 1", "Potential Buyer 1 Contact Details", "Potential Buyer 1 email id",
-                        "Quantity", "Unit_Price", "Item_Description", "part_number", "UQC",
-                        "Potential Buyer 2", "Potential Buyer 2 Contact Details", "Potential Buyer 2 email id"
-                    FROM {table_name}
-                    WHERE {where}
-                    LIMIT :lim
-                """), {**params, "lim": limit}).fetchall()
-
-                scored: list[tuple[float, tuple]] = []
-                for r in rows:
-                    pn_val = (r[6] or "")
-                    score = max(
-                        similarity_score(normalize(pn_val, 2).lower(), q_no_seps.lower()),
-                        similarity_score(normalize(pn_val, 3).lower(), q_alnum.lower()),
-                        similarity_score(str(pn_val).lower(), q_original.lower()),
-                    )
-                    if score >= PART_NUMBER_CONFIG.get("min_similarity", 0.6):
-                        scored.append((score, r))
-                scored.sort(key=lambda x: x[0], reverse=True)
-
-                page = max(1, int(req.page or 1))
-                size = max(1, min(2000, int(req.page_size or 50)))
-                total_count = len(scored)
-                min_price = 0.0
-                max_price = 0.0
-                total_quantity = 0
-                start = 0 if req.show_all else (page - 1) * size
-                end = None if req.show_all else start + size
-                for score, r in scored[start:end]:
-                    price = float(r[4]) if r[4] is not None else 0.0
-                    qty = int(r[3]) if r[3] is not None else 0
-                    if min_price == 0.0 or price < min_price:
-                        min_price = price
-                    if price > max_price:
-                        max_price = price
-                    total_quantity += qty
-                    
-                    # Calculate confidence score for fallback results
-                    db_record = {
-                        "part_number": r[6] or "N/A",
-                        "item_description": r[5] or "N/A",
-                        "manufacturer": "N/A"  # Not available in this query
-                    }
-                    
-                    confidence_data = confidence_calculator.calculate_confidence(
-                        search_part=req.part_number,
-                        search_name="",  # Not available in single search
-                        search_manufacturer="",  # Not available in single search
-                        db_record=db_record
-                    )
-                    
-                    companies.append({
-                        "company_name": r[0] or "N/A",
-                        "contact_details": r[1] or "N/A",
-                        "email": r[2] or "N/A",
-                        "quantity": qty,
-                        "unit_price": price,
-                        "item_description": r[5] or "N/A",
-                        "part_number": r[6] or "N/A",
-                        "uqc": r[7] or "N/A",
-                        "secondary_buyer": r[8] or "N/A",
-                        "secondary_buyer_contact": r[9] or "N/A",
-                        "secondary_buyer_email": r[10] or "N/A",
-                        "confidence": confidence_data["confidence"],
-                        "match_type": confidence_data["match_type"],
-                        "match_status": confidence_data["match_status"],
-                        "confidence_breakdown": confidence_data["breakdown"]
-                    })
-        
-        size = max(1, min(2000, int(req.page_size or 50)))
-        total_pages = 1 if req.show_all else int((total_count + size - 1) // size) if size > 0 else 1
-
-        result = {
-            "part_number": req.part_number,
-            "total_matches": total_count,
-            "companies": companies,
-            "price_summary": {
-                "min_price": min_price,
-                "max_price": max_price,
-                "total_quantity": total_quantity
-            },
-            "page": int(req.page or 1),
-            "page_size": size,
-            "total_pages": total_pages,
-            "message": f"Found {total_count} companies with part number '{req.part_number}'. Price range: ₹{min_price:.2f} - ₹{max_price:.2f}",
-            "cached": False,
-            "latency_ms": int((time.perf_counter() - start_time) * 1000),
-            "table_name": table_name,
-            "show_all": bool(req.show_all),
-            "search_mode": search_mode,
-            "match_type": used_match_type,
-        }
         return result
         
     except HTTPException:
@@ -385,6 +98,7 @@ async def search_part_number_bulk(req: BulkPartSearchRequest, db: Session = Depe
     """Bulk search for multiple part numbers in a dataset.
 
     Returns a mapping from part_number -> result payload used in single search.
+    Uses unified search engine for consistent results.
     """
     import time, json
     start_time = time.perf_counter()
@@ -417,372 +131,19 @@ async def search_part_number_bulk(req: BulkPartSearchRequest, db: Session = Depe
     if not exists:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Dataset {req.file_id} not found or not processed yet")
 
-    # Prepare response map
-    results: dict[str, dict] = {}
-
-    # Shared search params
-    base_page = int(req.page or 1)
-    base_page_size = int(req.page_size or 50)
-    base_show_all = bool(req.show_all)
-    base_search_mode = (req.search_mode or "exact").lower()
-
-    # Execute search per part using inlined single-search logic (copy of previous handler)
-    for pn in normalized:
-        try:
-            # Reset transaction state before each search to prevent "aborted transaction" errors
-            try:
-                db.rollback()
-            except:
-                pass  # Ignore if no transaction to rollback
-            
-            # Quick table existence is already checked
-            # Get column names for dynamic search
-            columns_result = db.execute(text(f"""
-                SELECT column_name, data_type 
-                FROM information_schema.columns 
-                WHERE table_name = '{table_name}' 
-                AND data_type IN ('text', 'character varying', 'character', 'varchar')
-                ORDER BY ordinal_position
-            """))
-            text_columns = [row[0] for row in columns_result.fetchall()]
-            if not text_columns:
-                all_columns_result = db.execute(text(f"""
-                    SELECT column_name 
-                    FROM information_schema.columns 
-                    WHERE table_name = '{table_name}' 
-                    ORDER BY ordinal_position
-                """))
-                text_columns = [row[0] for row in all_columns_result.fetchall()]
-
-            if len(pn.strip()) < 2:
-                results[pn] = {
-                    "part_number": pn,
-                    "total_matches": 0,
-                    "companies": [],
-                    "message": "Enter at least 2 characters to search",
-                    "cached": False,
-                    "latency_ms": int((time.perf_counter() - start_time) * 1000)
-                }
-                continue
-
-            def sql_strip_separators(expr: str) -> str:
-                s = expr
-                for sep in PART_NUMBER_CONFIG["separators"]:
-                    s = f"REPLACE({s}, '{sep}', '')"
-                return s
-
-            def sql_strip_non_alnum(expr: str) -> str:
-                return f"REGEXP_REPLACE({expr}, '[^a-zA-Z0-9]+', '', 'g')"
-
-            q_original = pn.strip()
-            q_no_seps = normalize(q_original, 2)
-            q_alnum = normalize(q_original, 3)
-
-            search_mode = base_search_mode
-            pn_expr = '"part_number"'
-            item_desc_expr = 'CAST("Item_Description" AS TEXT)'
-
-            exact_conditions = [
-                f"LOWER({pn_expr}) = LOWER(:q_original)",
-                f"LOWER({sql_strip_separators(pn_expr)}) = LOWER(:q_no_seps)",
-                f"LOWER({sql_strip_non_alnum(pn_expr)}) = LOWER(:q_alnum)",
-            ]
-
-            like_conditions = [
-                f"{item_desc_expr} ILIKE :pattern_any",
-                f"LOWER({sql_strip_separators(item_desc_expr)}) LIKE LOWER(:pattern_no_seps)",
-                f"LOWER({sql_strip_non_alnum(item_desc_expr)}) LIKE LOWER(:pattern_alnum)",
-                f"LOWER({sql_strip_separators(pn_expr)}) LIKE LOWER(:pattern_no_seps)",
-                f"LOWER({sql_strip_non_alnum(pn_expr)}) LIKE LOWER(:pattern_alnum)",
-            ]
-
-            fuzzy_conditions = [
-                "similarity(lower(CAST(\"Item_Description\" AS TEXT)), lower(:q_original)) >= :min_sim",
-            ] if PART_NUMBER_CONFIG.get("enable_db_fuzzy", True) else []
-
-            pipelines: list[tuple[str, dict, str]] = []
-            pipelines.append((" OR ".join(exact_conditions), {
-                "q_original": q_original,
-                "q_no_seps": q_no_seps,
-                "q_alnum": q_alnum,
-            }, "exact"))
-
-            if search_mode in ("hybrid", "fuzzy"):
-                pipelines.append((" OR ".join(like_conditions), {
-                    "pattern_any": f"%{q_original}%",
-                    "pattern_no_seps": f"%{q_no_seps}%",
-                    "pattern_alnum": f"%{q_alnum}%",
-                }, "separator_like"))
-                if fuzzy_conditions:
-                    pipelines.append((" OR ".join(fuzzy_conditions), {
-                        "q_original": q_original,
-                        "min_sim": PART_NUMBER_CONFIG.get("min_similarity", 0.6),
-                    }, "fuzzy_trgm"))
-
-            def execute_pipeline(where_sql: str, params: dict, match_type: str):
-                # Build dynamic SELECT statement based on available columns
-                def build_select_statement():
-                    # Get all available columns
-                    all_columns_result = db.execute(text(f"""
-                        SELECT column_name 
-                        FROM information_schema.columns 
-                        WHERE table_name = '{table_name}' 
-                        ORDER BY ordinal_position
-                    """)).fetchall()
-                    available_columns = [row[0] for row in all_columns_result]
-                    
-                    # Define column mappings with fallbacks
-                    column_mappings = {
-                        'company_name': ['Potential Buyer 1', 'Company Name', 'Buyer 1', 'Company'],
-                        'contact_details': ['Potential Buyer 1 Contact Details', 'Contact Details', 'Contact', 'Phone'],
-                        'email': ['Potential Buyer 1 email id', 'Email', 'Email ID', 'Email Address'],
-                        'quantity': ['Quantity', 'Qty', 'Amount'],
-                        'unit_price': ['Unit_Price', 'Unit Price', 'Price', 'Cost'],
-                        'item_description': ['Item_Description', 'Item Description', 'Description', 'Product'],
-                        'part_number': ['part_number', 'Part Number', 'Part No', 'Part'],
-                        'uqc': ['UQC', 'Unit', 'Unit of Measure'],
-                        'secondary_buyer': ['Potential Buyer 2', 'Buyer 2', 'Secondary Buyer'],
-                        'secondary_buyer_contact': ['Potential Buyer 2 Contact Details', 'Buyer 2 Contact', 'Secondary Contact'],
-                        'secondary_buyer_email': ['Potential Buyer 2 email id', 'Buyer 2 Email', 'Secondary Email']
-                    }
-                    
-                    select_parts = []
-                    for alias, possible_columns in column_mappings.items():
-                        found_column = None
-                        for col in possible_columns:
-                            if col in available_columns:
-                                found_column = col
-                                break
-                        
-                        if found_column:
-                            select_parts.append(f'"{found_column}" as {alias}')
-                        else:
-                            # Use NULL for missing columns
-                            select_parts.append(f'NULL as {alias}')
-                    
-                    return ', '.join(select_parts)
-                
-                base_select = f"""
-                    SELECT {build_select_statement()}
-                    FROM {table_name} 
-                    WHERE {where_sql}
-                """
-                order_clause = "ORDER BY \"Unit_Price\" ASC"
-                if match_type == "fuzzy_trgm":
-                    order_clause = "ORDER BY similarity(lower(CAST(\"Item_Description\" AS TEXT)), lower(:q_original)) DESC, \"Unit_Price\" ASC"
-
-                stats_sql_local = f"""
-                    SELECT 
-                        COUNT(*) as total_matches,
-                        MIN("Unit_Price") as min_price,
-                        MAX("Unit_Price") as max_price,
-                        SUM("Quantity") as total_quantity
-                    FROM {table_name} 
-                    WHERE {where_sql}
-                """
-
-                page = max(1, int(base_page))
-                size = max(1, min(2000, int(base_page_size)))
-                if base_show_all:
-                    paged_sql = base_select + f"\n{order_clause}\nLIMIT :limit OFFSET :offset"
-                    run_params = {**params, "limit": 100000, "offset": 0}
-                else:
-                    offset = (page - 1) * size
-                    paged_sql = base_select + f"\n{order_clause}\nLIMIT :limit OFFSET :offset"
-                    run_params = {**params, "limit": size, "offset": offset}
-
-                matching_rows = db.execute(text(paged_sql), run_params).fetchall()
-                stats = db.execute(text(stats_sql_local), params).fetchone()
-                return matching_rows, stats, match_type
-
-            companies = []
-            total_count = 0
-            min_price = 0.0
-            max_price = 0.0
-            total_quantity = 0
-            used_match_type = "none"
-
-            last_exception = None
-            for where_sql, params, match_type in pipelines:
-                try:
-                    matching_rows, stats, used_match_type = execute_pipeline(where_sql, params, match_type)
-                    if stats and stats[0]:
-                        total_count = stats[0] or 0
-                        min_price = float(stats[1]) if stats[1] is not None else 0.0
-                        max_price = float(stats[2]) if stats[2] is not None else 0.0
-                        total_quantity = int(stats[3]) if stats[3] is not None else 0
-
-                        for row in matching_rows:
-                            companies.append({
-                                "company_name": row[0] or "N/A",
-                                "contact_details": row[1] or "N/A",
-                                "email": row[2] or "N/A",
-                                "quantity": int(row[3]) if row[3] is not None else 0,
-                                "unit_price": float(row[4]) if row[4] is not None else 0.0,
-                                "item_description": row[5] or "N/A",
-                                "part_number": row[6] or "N/A",
-                                "uqc": row[7] or "N/A",
-                                "secondary_buyer": row[8] or "N/A",
-                                "secondary_buyer_contact": row[9] or "N/A",
-                                "secondary_buyer_email": row[10] or "N/A",
-                            })
-                        break
-                except Exception as e:  # pragma: no cover
-                    last_exception = e
-                    # Rollback transaction to reset state for next iteration
-                    try:
-                        db.rollback()
-                    except:
-                        pass
-                    continue
-
-            # Fallback fuzzy_python if no results and mode allows
-            if total_count == 0 and search_mode in ("hybrid", "fuzzy"):
-                tokens = separator_tokenize(q_original)
-                tokens = [t for t in tokens if t]
-                if tokens:
-                    clauses = ["CAST(\"Item_Description\" AS TEXT) ILIKE :tok_" + str(i) for i, _ in enumerate(tokens)]
-                    where = " OR ".join(clauses)
-                    params = {"tok_" + str(i): f"%{t}%" for i, t in enumerate(tokens)}
-                    limit = min(1000, PART_NUMBER_CONFIG.get("db_batch_size", 5000))
-                    
-                    # Build dynamic SELECT for fallback search
-                    def build_fallback_select():
-                        all_columns_result = db.execute(text(f"""
-                            SELECT column_name 
-                            FROM information_schema.columns 
-                            WHERE table_name = '{table_name}' 
-                            ORDER BY ordinal_position
-                        """)).fetchall()
-                        available_columns = [row[0] for row in all_columns_result]
-                        
-                        column_mappings = {
-                            'company_name': ['Potential Buyer 1', 'Company Name', 'Buyer 1', 'Company'],
-                            'contact_details': ['Potential Buyer 1 Contact Details', 'Contact Details', 'Contact', 'Phone'],
-                            'email': ['Potential Buyer 1 email id', 'Email', 'Email ID', 'Email Address'],
-                            'quantity': ['Quantity', 'Qty', 'Amount'],
-                            'unit_price': ['Unit_Price', 'Unit Price', 'Price', 'Cost'],
-                            'item_description': ['Item_Description', 'Item Description', 'Description', 'Product'],
-                            'part_number': ['part_number', 'Part Number', 'Part No', 'Part'],
-                            'uqc': ['UQC', 'Unit', 'Unit of Measure'],
-                            'secondary_buyer': ['Potential Buyer 2', 'Buyer 2', 'Secondary Buyer'],
-                            'secondary_buyer_contact': ['Potential Buyer 2 Contact Details', 'Buyer 2 Contact', 'Secondary Contact'],
-                            'secondary_buyer_email': ['Potential Buyer 2 email id', 'Buyer 2 Email', 'Secondary Email']
-                        }
-                        
-                        select_parts = []
-                        for alias, possible_columns in column_mappings.items():
-                            found_column = None
-                            for col in possible_columns:
-                                if col in available_columns:
-                                    found_column = col
-                                    break
-                            
-                            if found_column:
-                                select_parts.append(f'"{found_column}"')
-                            else:
-                                select_parts.append('NULL')
-                        
-                        return ', '.join(select_parts)
-                    
-                    rows = db.execute(text(f"""
-                        SELECT {build_fallback_select()}
-                        FROM {table_name}
-                        WHERE {where}
-                        LIMIT :lim
-                    """), {**params, "lim": limit}).fetchall()
-
-                    scored: list[tuple[float, tuple]] = []
-                    for r in rows:
-                        item_desc = (r[5] or "")
-                        pn_val = (r[6] or "")
-                        score = max(
-                            similarity_score(normalize(pn_val, 2).lower(), q_no_seps.lower()),
-                            similarity_score(normalize(pn_val, 3).lower(), q_alnum.lower()),
-                            similarity_score(str(pn_val).lower(), q_original.lower()),
-                        )
-                        if score >= PART_NUMBER_CONFIG.get("min_similarity", 0.6):
-                            scored.append((score, r))
-                    scored.sort(key=lambda x: x[0], reverse=True)
-
-                    page = max(1, int(base_page))
-                    size = max(1, min(2000, int(base_page_size)))
-                    total_count = len(scored)
-                    min_price = 0.0
-                    max_price = 0.0
-                    total_quantity = 0
-                    start = 0 if base_show_all else (page - 1) * size
-                    end = None if base_show_all else start + size
-                    for score, r in scored[start:end]:
-                        price = float(r[4]) if r[4] is not None else 0.0
-                        qty = int(r[3]) if r[3] is not None else 0
-                        if min_price == 0.0 or price < min_price:
-                            min_price = price
-                        if price > max_price:
-                            max_price = price
-                        total_quantity += qty
-                        companies.append({
-                            "company_name": r[0] or "N/A",
-                            "contact_details": r[1] or "N/A",
-                            "email": r[2] or "N/A",
-                            "quantity": qty,
-                            "unit_price": price,
-                            "item_description": r[5] or "N/A",
-                            "part_number": r[6] or "N/A",
-                            "uqc": r[7] or "N/A",
-                            "secondary_buyer": r[8] or "N/A",
-                            "secondary_buyer_contact": r[9] or "N/A",
-                            "secondary_buyer_email": r[10] or "N/A",
-                        })
-
-            size = max(1, min(2000, int(base_page_size)))
-            total_pages = 1 if base_show_all else int((total_count + size - 1) // size) if size > 0 else 1
-
-            payload = {
-                "part_number": pn,
-                "total_matches": total_count,
-                "companies": companies,
-                "price_summary": {
-                    "min_price": min_price,
-                    "max_price": max_price,
-                    "total_quantity": total_quantity
-                },
-                "page": int(base_page),
-                "page_size": size,
-                "total_pages": total_pages,
-                "message": f"Found {total_count} companies with part number '{pn}'. Price range: ₹{min_price:.2f} - ₹{max_price:.2f}",
-                "cached": False,
-                "latency_ms": int((time.perf_counter() - start_time) * 1000),
-                "searched_columns": text_columns,
-                "table_name": table_name,
-                "show_all": bool(base_show_all),
-                "search_mode": search_mode,
-                "match_type": used_match_type,
-            }
-            results[pn] = payload
-        except Exception as e:
-            # Ensure transaction is rolled back on error
-            try:
-                db.rollback()
-            except:
-                pass
-            
-            results[pn] = {
-                "part_number": pn,
-                "total_matches": 0,
-                "companies": [],
-                "message": f"Search failed: {str(e)}",
-                "cached": False,
-                "latency_ms": int((time.perf_counter() - start_time) * 1000),
-                "error": str(e)
-            }
-
-    return {
-        "results": results,
-        "total_parts": len(results),
-        "latency_ms": int((time.perf_counter() - start_time) * 1000),
-        "file_id": req.file_id,
-    }
+    # Use unified search engine for consistent results
+    from app.services.search_engine.unified_search_engine import UnifiedSearchEngine
+    
+    search_engine = UnifiedSearchEngine(db, table_name, file_id=req.file_id)
+    result = search_engine.search_bulk_parts(
+        part_numbers=normalized,
+        search_mode=req.search_mode or "hybrid",
+        page=req.page or 1,
+        page_size=req.page_size or 1000,  # Reasonable default for pagination
+        show_all=req.show_all or False  # Use pagination by default for better performance
+    )
+    
+    return result
 
 
 @router.post("/search-part-bulk-upload")
@@ -904,17 +265,20 @@ async def search_part_number_bulk_upload(file_id: int = Form(...), file: UploadF
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to parse file: {e}")
 
-    # Route through Elasticsearch-powered endpoint (has built-in fallback to PostgreSQL)
-    from app.api.v1.endpoints.query_elasticsearch import search_part_number_bulk_elasticsearch
-    payload = {
-        'file_id': file_id, 
-        'part_numbers': parts, 
-        'page': 1, 
-        'page_size': 50, 
-        'show_all': False,
-        'search_mode': 'hybrid'
-    }
-    return await search_part_number_bulk_elasticsearch(payload, db, user)
+    # Use unified search engine for consistent results
+    from app.services.search_engine.unified_search_engine import UnifiedSearchEngine
+    
+    table_name = f"ds_{file_id}"
+    search_engine = UnifiedSearchEngine(db, table_name, file_id=file_id)
+    result = search_engine.search_bulk_parts(
+        part_numbers=parts,
+        search_mode='hybrid',
+        page=1,
+        page_size=1000,  # Reasonable default for pagination
+        show_all=False  # Use pagination for better performance
+    )
+    
+    return result
 
 @router.get("/test-search/{file_id}")
 async def test_search_endpoint(file_id: int, db: Session = Depends(get_db), user=Depends(get_current_user)) -> dict:
@@ -960,5 +324,157 @@ async def test_search_endpoint(file_id: int, db: Session = Depends(get_db), user
             "message": str(e),
             "table_exists": False
         }
+
+
+@router.get("/test-comprehensive-search/{file_id}")
+async def test_comprehensive_search(file_id: int, db: Session = Depends(get_db), user=Depends(get_current_user)) -> dict:
+    """Test endpoint to verify comprehensive search results for SMD."""
+    try:
+        table_name = f"ds_{file_id}"
+        
+        # Check if table exists
+        exists = db.execute(text(f"""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_name = '{table_name}'
+            );
+        """)).scalar()
+        
+        if not exists:
+            return {"error": f"Dataset {file_id} not found"}
+        
+        # Get total row count
+        total_rows = db.execute(text(f"SELECT COUNT(*) FROM {table_name}")).scalar()
+        
+        # Test search for "SMD" to see how many results we get
+        from app.services.search_engine.unified_search_engine import UnifiedSearchEngine
+        
+        search_engine = UnifiedSearchEngine(db, table_name, file_id=file_id)
+        
+        # Test with comprehensive settings
+        result = search_engine.search_single_part(
+            "SMD", 
+            search_mode="hybrid", 
+            page=1, 
+            page_size=10000, 
+            show_all=True
+        )
+        
+        # Also test bulk search
+        bulk_result = search_engine.search_bulk_parts(
+            ["SMD"], 
+            search_mode="hybrid", 
+            page=1, 
+            page_size=10000, 
+            show_all=True
+        )
+        
+        return {
+            "file_id": file_id,
+            "table_name": table_name,
+            "total_rows_in_dataset": total_rows,
+            "single_search_results": {
+                "part_number": "SMD",
+                "total_matches": result.get("total_matches", 0),
+                "companies_returned": len(result.get("companies", [])),
+                "search_engine_used": result.get("search_engine", "unknown"),
+                "message": result.get("message", ""),
+                "page": result.get("page", 1),
+                "page_size": result.get("page_size", 1000),
+                "total_pages": result.get("total_pages", 1)
+            },
+            "bulk_search_results": {
+                "part_number": "SMD",
+                "total_matches": bulk_result.get("results", {}).get("SMD", {}).get("total_matches", 0),
+                "companies_returned": len(bulk_result.get("results", {}).get("SMD", {}).get("companies", [])),
+                "search_engine_used": bulk_result.get("search_engine", "unknown"),
+                "page": bulk_result.get("results", {}).get("SMD", {}).get("page", 1),
+                "page_size": bulk_result.get("results", {}).get("SMD", {}).get("page_size", 1000),
+                "total_pages": bulk_result.get("results", {}).get("SMD", {}).get("total_pages", 1)
+            },
+            "expected_results": "Should show all 7333+ results with proper pagination support for 100,000+ results"
+        }
+        
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@router.get("/test-unlimited-search/{file_id}")
+async def test_unlimited_search(
+    file_id: int, 
+    part_number: str = "SMD",
+    page: int = 1,
+    page_size: int = 1000,
+    show_all: bool = False,
+    db: Session = Depends(get_db), 
+    user=Depends(get_current_user)
+) -> dict:
+    """Test endpoint to verify unlimited search results with pagination."""
+    try:
+        table_name = f"ds_{file_id}"
+        
+        # Check if table exists
+        exists = db.execute(text(f"""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_name = '{table_name}'
+            );
+        """)).scalar()
+        
+        if not exists:
+            return {"error": f"Dataset {file_id} not found"}
+        
+        # Get total row count
+        total_rows = db.execute(text(f"SELECT COUNT(*) FROM {table_name}")).scalar()
+        
+        # Test search with specified parameters
+        from app.services.search_engine.unified_search_engine import UnifiedSearchEngine
+        
+        search_engine = UnifiedSearchEngine(db, table_name, file_id=file_id)
+        
+        # Test with specified pagination settings
+        result = search_engine.search_single_part(
+            part_number, 
+            search_mode="hybrid", 
+            page=page, 
+            page_size=page_size, 
+            show_all=show_all
+        )
+        
+        return {
+            "file_id": file_id,
+            "table_name": table_name,
+            "total_rows_in_dataset": total_rows,
+            "search_parameters": {
+                "part_number": part_number,
+                "page": page,
+                "page_size": page_size,
+                "show_all": show_all,
+                "search_mode": "hybrid"
+            },
+            "search_results": {
+                "total_matches": result.get("total_matches", 0),
+                "companies_returned": len(result.get("companies", [])),
+                "search_engine_used": result.get("search_engine", "unknown"),
+                "message": result.get("message", ""),
+                "page": result.get("page", 1),
+                "page_size": result.get("page_size", 1000),
+                "total_pages": result.get("total_pages", 1),
+                "latency_ms": result.get("latency_ms", 0)
+            },
+            "pagination_info": {
+                "current_page": page,
+                "page_size": page_size,
+                "total_pages": result.get("total_pages", 1),
+                "has_next_page": page < result.get("total_pages", 1),
+                "has_previous_page": page > 1,
+                "next_page": page + 1 if page < result.get("total_pages", 1) else None,
+                "previous_page": page - 1 if page > 1 else None
+            },
+            "performance_note": "System now supports unlimited results with efficient pagination"
+        }
+        
+    except Exception as e:
+        return {"error": str(e)}
 
 

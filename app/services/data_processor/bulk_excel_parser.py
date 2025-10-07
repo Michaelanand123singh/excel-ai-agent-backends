@@ -33,10 +33,10 @@ class MatchStatus(Enum):
 class UserPartData:
     """Standardized user part data from Excel upload"""
     part_number: str
-    part_name: str
-    quantity: int
-    manufacturer_name: str
-    row_index: int  # Original row number for error reporting
+    part_name: str = ""
+    quantity: int = 0
+    manufacturer_name: str = ""
+    row_index: int = 0  # Original row number for error reporting
 
 
 @dataclass
@@ -82,7 +82,7 @@ class BulkExcelParser:
         missing_headers = []
         column_mapping = {}
         
-        # Flexible header matching
+        # Flexible header matching - only check for required headers from config
         header_variations = {
             "part number": ["part number", "part_number", "partnumber", "part no", "partno", "pn"],
             "part name": ["part name", "part_name", "partname", "description", "desc", "item name"],
@@ -90,15 +90,19 @@ class BulkExcelParser:
             "manufacturer name": ["manufacturer name", "manufacturer_name", "manufacturer", "mfg", "brand", "supplier"]
         }
         
-        for required_field, variations in header_variations.items():
-            found = False
-            for variation in variations:
-                if variation in normalized_headers:
-                    column_mapping[required_field] = header_mapping[variation]
-                    found = True
-                    break
-            if not found:
-                missing_headers.append(required_field)
+        # Only check for headers that are required in the config
+        for required_field in self.config.required_headers:
+            required_field_lower = required_field.lower()
+            if required_field_lower in header_variations:
+                variations = header_variations[required_field_lower]
+                found = False
+                for variation in variations:
+                    if variation in normalized_headers:
+                        column_mapping[required_field_lower] = header_mapping[variation]
+                        found = True
+                        break
+                if not found:
+                    missing_headers.append(required_field_lower)
         
         if missing_headers:
             return False, f"Missing required headers: {missing_headers}. Found: {list(header_mapping.keys())}", {}
@@ -248,25 +252,34 @@ class BulkExcelParser:
             # Process each row
             for idx, row in df.iterrows():
                 try:
-                    # Extract data using column mapping
+                    # Extract data using column mapping - only access columns that exist
                     raw_pn = row[column_mapping["part number"]] if pd.notna(row[column_mapping["part number"]]) else ""
                     part_number = normalize_part_number_value(raw_pn)
-                    part_name = str(row[column_mapping["part name"]]).strip() if pd.notna(row[column_mapping["part name"]]) else ""
-                    manufacturer_name = str(row[column_mapping["manufacturer name"]]).strip() if pd.notna(row[column_mapping["manufacturer name"]]) else ""
                     
-                    # Parse quantity
-                    quantity_raw = row[column_mapping["quantity"]]
-                    if pd.isna(quantity_raw):
-                        quantity = 0
-                    else:
-                        try:
-                            # Handle various quantity formats
-                            if isinstance(quantity_raw, str):
-                                quantity_raw = quantity_raw.replace(',', '').strip()
-                            quantity = int(float(quantity_raw))
-                        except (ValueError, TypeError):
+                    # Extract optional fields only if they exist in column mapping
+                    part_name = ""
+                    if "part name" in column_mapping:
+                        part_name = str(row[column_mapping["part name"]]).strip() if pd.notna(row[column_mapping["part name"]]) else ""
+                    
+                    manufacturer_name = ""
+                    if "manufacturer name" in column_mapping:
+                        manufacturer_name = str(row[column_mapping["manufacturer name"]]).strip() if pd.notna(row[column_mapping["manufacturer name"]]) else ""
+                    
+                    # Parse quantity only if it exists
+                    quantity = 0
+                    if "quantity" in column_mapping:
+                        quantity_raw = row[column_mapping["quantity"]]
+                        if pd.isna(quantity_raw):
                             quantity = 0
-                            errors.append(f"Row {idx + 2}: Invalid quantity '{quantity_raw}', using 0")
+                        else:
+                            try:
+                                # Handle various quantity formats
+                                if isinstance(quantity_raw, str):
+                                    quantity_raw = quantity_raw.replace(',', '').strip()
+                                quantity = int(float(quantity_raw))
+                            except (ValueError, TypeError):
+                                quantity = 0
+                                errors.append(f"Row {idx + 2}: Invalid quantity '{quantity_raw}', using 0")
                     
                     # Skip rows with empty part number
                     if not part_number or part_number.lower() in ['nan', 'none', '']:
