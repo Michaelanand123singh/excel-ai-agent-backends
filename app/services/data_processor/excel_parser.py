@@ -49,63 +49,97 @@ def iter_rows(file_bytes: bytes, filename: str, chunk_size: int = 10000, skip_ro
         if load_workbook is None:
             # Fallback to pandas full read if openpyxl is unavailable
             bio = BytesIO(file_bytes)
-            bio.seek(0)
-            sample = pd.read_excel(bio, engine="openpyxl", nrows=0)
-            ok, msg = validate_headers([str(c).strip() for c in list(sample.columns)])
-            if not ok:
-                raise ValueError(msg)
-            bio.seek(0)
-            df = pd.read_excel(bio, engine="openpyxl")
-            cols = [c for c in df.columns if c in expected_headers()]
-            df = df[cols]
-            df = df.where(pd.notnull(df), None)
-            records = df.to_dict(orient="records")
-            for start in range(0, len(records), chunk_size):
-                yield records[start:start + chunk_size]
-            return
+            try:
+                # Use ExcelFile to iterate all sheets
+                xls = pd.ExcelFile(bio, engine="openpyxl")
+                total_skipped = 0
+                for sheet_name in xls.sheet_names:
+                    df = xls.parse(sheet_name)
+                    if df is None or df.empty:
+                        continue
+                    ok, msg = validate_headers([str(c).strip() for c in list(df.columns)])
+                    if not ok:
+                        # Skip sheets that don't match expected schema
+                        continue
+                    cols = [c for c in df.columns if c in expected_headers()]
+                    df = df[cols]
+                    df = df.where(pd.notnull(df), None)
+                    records = df.to_dict(orient="records")
+                    # Apply cross-sheet skipping
+                    if skip_rows and total_skipped < skip_rows:
+                        take_from_skip = min(len(records), skip_rows - total_skipped)
+                        records = records[take_from_skip:]
+                        total_skipped += take_from_skip
+                    for start in range(0, len(records), chunk_size):
+                        chunk = records[start:start + chunk_size]
+                        if chunk:
+                            yield chunk
+                return
+            except Exception:
+                # Fall back to single-sheet read
+                bio.seek(0)
+                sample = pd.read_excel(bio, engine="openpyxl", nrows=0)
+                ok, msg = validate_headers([str(c).strip() for c in list(sample.columns)])
+                if not ok:
+                    raise ValueError(msg)
+                bio.seek(0)
+                df = pd.read_excel(bio, engine="openpyxl")
+                cols = [c for c in df.columns if c in expected_headers()]
+                df = df[cols]
+                df = df.where(pd.notnull(df), None)
+                records = df.to_dict(orient="records")
+                for start in range(0, len(records), chunk_size):
+                    yield records[start:start + chunk_size]
+                return
 
         bio = BytesIO(file_bytes)
         wb = load_workbook(filename=bio, read_only=True, data_only=True)
-        ws = wb.worksheets[0]
-        rows_iter = ws.iter_rows(values_only=True)
-        try:
-            header = next(rows_iter)
-        except StopIteration:
-            wb.close()
-            return
-        header_list = [str(h).strip() if h is not None else "" for h in header]
-        ok, msg = validate_headers(header_list)
-        if not ok:
-            wb.close()
-            raise ValueError(msg)
-        # Maintain only expected columns
-        header_to_keep = expected_headers()
-        keep_indices = [i for i, h in enumerate(header_list) if h in header_to_keep]
-
-        # Skip already processed data rows (after header)
-        if skip_rows and skip_rows > 0:
-            for _ in range(skip_rows):
-                try:
-                    next(rows_iter)
-                except StopIteration:
-                    wb.close()
-                    return
-
+        total_skipped = 0
         batch: List[dict] = []
-        for row in rows_iter:
-            if row is None:
-                continue
-            record = {}
-            for idx in keep_indices:
-                col_name = header_list[idx]
-                value = row[idx] if idx < len(row) else None
-                record[col_name] = value
-            batch.append(record)
-            if len(batch) >= chunk_size:
+
+        try:
+            for ws in wb.worksheets:
+                rows_iter = ws.iter_rows(values_only=True)
+                try:
+                    header = next(rows_iter)
+                except StopIteration:
+                    continue
+                header_list = [str(h).strip() if h is not None else "" for h in header]
+                ok, msg = validate_headers(header_list)
+                if not ok:
+                    # Skip sheets that don't match expected schema
+                    continue
+                # Maintain only expected columns
+                header_to_keep = expected_headers()
+                keep_indices = [i for i, h in enumerate(header_list) if h in header_to_keep]
+
+                # Skip already processed data rows (after header) across sheets
+                if skip_rows and total_skipped < skip_rows:
+                    to_skip_here = skip_rows - total_skipped
+                    skipped_here = 0
+                    while skipped_here < to_skip_here:
+                        try:
+                            next(rows_iter)
+                        except StopIteration:
+                            break
+                        skipped_here += 1
+                    total_skipped += skipped_here
+
+                for row in rows_iter:
+                    if row is None:
+                        continue
+                    record = {}
+                    for idx in keep_indices:
+                        col_name = header_list[idx]
+                        value = row[idx] if idx < len(row) else None
+                        record[col_name] = value
+                    batch.append(record)
+                    if len(batch) >= chunk_size:
+                        yield batch
+                        batch = []
+            if batch:
                 yield batch
-                batch = []
-        if batch:
-            yield batch
-        wb.close()
+        finally:
+            wb.close()
 
 
