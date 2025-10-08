@@ -61,7 +61,7 @@ class UnifiedSearchEngine:
             logger.warning(f"⚠️ Neither GCS nor ES available, using PostgreSQL fallback for {table_name}")
         
     def search_single_part(self, part_number: str, search_mode: str = "hybrid", 
-                          page: int = 1, page_size: int = 50, show_all: bool = False) -> Dict[str, Any]:
+                          page: int = 1, page_size: int = 100, show_all: bool = False) -> Dict[str, Any]:
         """
         Search for a single part number with comprehensive matching
         Uses Elasticsearch as primary search engine with PostgreSQL fallback
@@ -192,7 +192,7 @@ class UnifiedSearchEngine:
         }
     
     def search_bulk_parts(self, part_numbers: List[str], search_mode: str = "hybrid",
-                         page: int = 1, page_size: int = 50, show_all: bool = False) -> Dict[str, Any]:
+                         page: int = 1, page_size: int = 100, show_all: bool = False) -> Dict[str, Any]:
         """
         Search for multiple part numbers using Elasticsearch as primary with PostgreSQL fallback
         Ensures consistent results between single and bulk search
@@ -206,7 +206,7 @@ class UnifiedSearchEngine:
                 result = self.gcs_client.bulk_search(
                     part_numbers=part_numbers,
                     file_id=self.file_id,
-                    limit_per_part=page_size if not show_all else 1000
+                    limit_per_part=10000000  # Show ALL results from dataset (up to 1 crore)
                 )
                 if result and result.get('total_matches', 0) > 0:
                     result['search_engine'] = 'google_cloud_search'
@@ -277,8 +277,8 @@ class UnifiedSearchEngine:
         """
         try:
             # Use Elasticsearch bulk search with chunking to avoid oversized msearch bodies
-            # For unlimited results, we'll use a very high limit and rely on pagination
-            limit_per_part = 100000 if show_all else page_size * 50  # Support up to 100k results per part
+            # For bulk search, show ALL results from dataset for each part
+            limit_per_part = 10000000  # Show ALL results from dataset (up to 1 crore for massive datasets)
 
             # Optimized chunk size for ultra-fast ES searches
             # 100 parts per chunk = faster processing, fewer API calls

@@ -143,8 +143,8 @@ async def search_part_number_bulk(req: BulkPartSearchRequest, db: Session = Depe
         part_numbers=normalized,
         search_mode=req.search_mode or "hybrid",
         page=req.page or 1,
-        page_size=req.page_size or 1000,  # Reasonable default for pagination
-        show_all=req.show_all or False  # Use pagination by default for better performance
+        page_size=10000000,  # Show ALL results from dataset (up to 1 crore)
+        show_all=True  # Always show all results for bulk search
     )
     
     return result
@@ -278,8 +278,8 @@ async def search_part_number_bulk_upload(file_id: int = Form(...), file: UploadF
         part_numbers=parts,
         search_mode='hybrid',
         page=1,
-        page_size=1000,  # Reasonable default for pagination
-        show_all=False  # Use pagination for better performance
+        page_size=10000000,  # Show ALL results from dataset (up to 1 crore)
+        show_all=True  # Always show all results for bulk search
     )
     
     return result

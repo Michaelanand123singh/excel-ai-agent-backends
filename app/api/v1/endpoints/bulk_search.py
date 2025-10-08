@@ -102,8 +102,8 @@ async def bulk_excel_search(
             part_numbers=parsed_parts,
             search_mode=search_mode,
             page=1,
-            page_size=1000,  # Reasonable default for pagination
-            show_all=False  # Use pagination for better performance
+            page_size=10000000,  # Show ALL results from dataset (up to 1 crore)
+            show_all=True  # Always show all results for bulk search
         )
         
         # Convert unified result format to expected format

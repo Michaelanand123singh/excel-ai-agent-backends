@@ -224,7 +224,7 @@ class ElasticsearchBulkSearch:
                             "secondary_buyer_email"
                         ]
                     },
-                    "size": min(limit_per_part, 20),  # Reduced to 20 for speed
+                    "size": limit_per_part,  # Show ALL results from dataset
                     "sort": [
                         {"_score": {"order": "desc"}},
                         {"unit_price": {"order": "asc"}}

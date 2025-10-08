@@ -180,7 +180,7 @@ class GoogleCloudSearchClient:
             logger.error(f"❌ Failed to index data: {e}")
             return False
     
-    def bulk_search(self, part_numbers: List[str], file_id: int, limit_per_part: int = 20) -> Dict[str, Any]:
+    def bulk_search(self, part_numbers: List[str], file_id: int, limit_per_part: int = 10000000) -> Dict[str, Any]:
         """Perform ultra-fast bulk search using Google Cloud Search"""
         if not self.client:
             logger.warning("⚠️ Google Cloud Search client not available")
@@ -328,7 +328,7 @@ class GoogleCloudSearchClient:
             raise Exception(f"Google Cloud Search failed: {e}")
     
     def search_single_part(self, part_number: str, file_id: int, search_mode: str = "hybrid", 
-                          page: int = 1, page_size: int = 50, show_all: bool = False) -> Dict[str, Any]:
+                          page: int = 1, page_size: int = 100, show_all: bool = False) -> Dict[str, Any]:
         """Search for a single part number using Google Cloud Search"""
         if not self.client:
             logger.warning("⚠️ Google Cloud Search client not available")
