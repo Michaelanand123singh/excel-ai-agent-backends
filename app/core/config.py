@@ -67,6 +67,11 @@ class Settings(BaseSettings):
     ES_INDEX_PREFIX: str = os.getenv("ES_INDEX_PREFIX", "parts_search")
     ES_TIMEOUT_MS: int = int(os.getenv("ES_TIMEOUT_MS", "30000"))
 
+    # Google Cloud Search
+    GOOGLE_CLOUD_PROJECT_ID: Optional[str] = os.getenv("GOOGLE_CLOUD_PROJECT_ID")
+    GOOGLE_CLOUD_SEARCH_INDEX_ID: str = os.getenv("GOOGLE_CLOUD_SEARCH_INDEX_ID", "parts-search-index")
+    GOOGLE_APPLICATION_CREDENTIALS: Optional[str] = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+
     # Ingestion tuning
     INGEST_BATCH_SIZE: int = 5000
     CHROMA_UPSERT_CHUNK: int = 5000

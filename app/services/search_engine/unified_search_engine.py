@@ -19,6 +19,7 @@ from app.utils.helpers.part_number import (
 )
 from app.services.query_engine.confidence_calculator import confidence_calculator
 from app.services.search_engine.elasticsearch_client import ElasticsearchBulkSearch
+from app.services.search_engine.google_cloud_search_client import GoogleCloudSearchClient
 
 logger = logging.getLogger(__name__)
 
@@ -34,14 +35,20 @@ class UnifiedSearchEngine:
         self.file_id = file_id
         self.cache = {}  # Simple in-memory cache for repeated searches
         
-        # Initialize Elasticsearch client
+        # Initialize Google Cloud Search client (primary)
+        self.gcs_client = GoogleCloudSearchClient()
+        self.gcs_available = self.gcs_client.is_available()
+        
+        # Initialize Elasticsearch client (fallback)
         self.es_client = ElasticsearchBulkSearch()
         self.es_available = self.es_client.is_available()
         
-        if self.es_available:
+        if self.gcs_available:
+            logger.info(f"✅ Google Cloud Search available for {table_name}")
+        elif self.es_available:
             logger.info(f"✅ Elasticsearch available for {table_name}")
         else:
-            logger.warning(f"⚠️ Elasticsearch not available, using PostgreSQL fallback for {table_name}")
+            logger.warning(f"⚠️ Neither GCS nor ES available, using PostgreSQL fallback for {table_name}")
         
     def search_single_part(self, part_number: str, search_mode: str = "hybrid", 
                           page: int = 1, page_size: int = 50, show_all: bool = False) -> Dict[str, Any]:
@@ -57,7 +64,28 @@ class UnifiedSearchEngine:
         
         part_number = part_number.strip()
         
-        # Try Elasticsearch first for better performance with large datasets
+        # Try Google Cloud Search first (primary)
+        if self.gcs_available and self.file_id:
+            try:
+                logger.info(f"🔍 Using Google Cloud Search for single search: {part_number}")
+                result = self.gcs_client.search_single_part(
+                    part_number=part_number,
+                    file_id=self.file_id,
+                    search_mode=search_mode,
+                    page=page,
+                    page_size=page_size,
+                    show_all=show_all
+                )
+                if result and result.get('total_matches', 0) > 0:
+                    result['search_engine'] = 'google_cloud_search'
+                    result['latency_ms'] = int((time.perf_counter() - start_time) * 1000)
+                    return result
+                else:
+                    logger.warning(f"⚠️ Google Cloud Search returned 0 results, falling back to Elasticsearch")
+            except Exception as e:
+                logger.warning(f"⚠️ Google Cloud Search failed, falling back to Elasticsearch: {e}")
+        
+        # Try Elasticsearch as fallback
         if self.es_available and self.file_id:
             try:
                 logger.info(f"🔍 Using Elasticsearch for single search: {part_number}")
@@ -161,7 +189,25 @@ class UnifiedSearchEngine:
         """
         start_time = time.perf_counter()
         
-        # Try Elasticsearch first for better performance with large datasets
+        # Try Google Cloud Search first (primary)
+        if self.gcs_available and self.file_id:
+            try:
+                logger.info(f"🔍 Using Google Cloud Search for bulk search: {len(part_numbers)} parts")
+                result = self.gcs_client.bulk_search(
+                    part_numbers=part_numbers,
+                    file_id=self.file_id,
+                    limit_per_part=page_size if not show_all else 1000
+                )
+                if result and result.get('total_matches', 0) > 0:
+                    result['search_engine'] = 'google_cloud_search'
+                    result['latency_ms'] = int((time.perf_counter() - start_time) * 1000)
+                    return result
+                else:
+                    logger.warning(f"⚠️ Google Cloud Search returned 0 results for all parts, falling back to Elasticsearch")
+            except Exception as e:
+                logger.warning(f"⚠️ Google Cloud Search bulk search failed, falling back to Elasticsearch: {e}")
+        
+        # Try Elasticsearch as fallback
         if self.es_available and self.file_id:
             try:
                 logger.info(f"🔍 Using Elasticsearch for bulk search: {len(part_numbers)} parts")

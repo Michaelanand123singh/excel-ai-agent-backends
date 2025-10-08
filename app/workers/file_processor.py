@@ -12,6 +12,7 @@ from app.services.database.ultra_fast_index_manager import create_ultra_fast_ind
 from app.services.cache.ultra_fast_cache_manager import ultra_fast_cache
 from app.core.websocket_manager import websocket_manager
 from app.services.search_engine.data_sync import DataSyncService
+from app.services.search_engine.google_cloud_search_client import GoogleCloudSearchClient
 
 logger = logging.getLogger("file_processor")
 
@@ -118,14 +119,52 @@ def run(file_id: int, content: bytes | None = None, filename: str | None = None)
 		except Exception as e:
 			logger.warning(f"Failed to warm up cache for table {table_name}: {e}")
 		
+		# Index data to Google Cloud Search for ultra-fast search
+		gcs_synced = False
+		try:
+			gcs_client = GoogleCloudSearchClient()
+			if gcs_client.is_available():
+				# Create index if it doesn't exist
+				gcs_client.create_index(table_name, file_id)
+				
+				# Get data from database to index
+				from sqlalchemy import text
+				data_result = session.execute(text(f"""
+					SELECT 
+						"part_number",
+						"Item_Description",
+						"Potential Buyer 1",
+						"Potential Buyer 1 Contact Details",
+						"Potential Buyer 1 email id",
+						"Quantity",
+						"Unit_Price",
+						"UQC",
+						"Potential Buyer 2",
+						"Potential Buyer 2 Contact Details",
+						"Potential Buyer 2 email id"
+					FROM {table_name}
+					LIMIT 100000
+				""")).fetchall()
+				
+				data = [dict(row._mapping) for row in data_result]
+				if data:
+					gcs_synced = gcs_client.index_data(data, file_id)
+					logger.info(f"✅ Google Cloud Search indexing {'completed' if gcs_synced else 'failed'} for file {file_id}")
+				else:
+					logger.warning(f"No data found to index for file {file_id}")
+			else:
+				logger.warning(f"Google Cloud Search not available for file {file_id}")
+		except Exception as gcs_err:
+			logger.warning(f"Google Cloud Search indexing failed for file {file_id}: {gcs_err}")
+		
 		# Notify processing complete
 		logger.info(f"Processing complete for file {file_id}: {total} rows processed")
 		try:
 			# Trigger Elasticsearch sync so bulk ES search is ready automatically
 			sync_service = DataSyncService()
-			sync_ok = False
+			es_synced = False
 			try:
-				sync_ok = sync_service.sync_file_to_elasticsearch(file_id)
+				es_synced = sync_service.sync_file_to_elasticsearch(file_id)
 			except Exception as sync_err:
 				logger.warning(f"Elasticsearch sync failed for file {file_id}: {sync_err}")
 			
@@ -140,7 +179,8 @@ def run(file_id: int, content: bytes | None = None, filename: str | None = None)
 				"total_rows": int(total),
 				"ultra_fast_optimized": True,
 				"bulk_search_ready": True,
-				"elasticsearch_synced": bool(sync_ok)
+				"google_cloud_search_synced": bool(gcs_synced),
+				"elasticsearch_synced": bool(es_synced)
 			}
 			if loop and loop.is_running():
 				loop.create_task(websocket_manager.send_progress(str(file_id), message))
