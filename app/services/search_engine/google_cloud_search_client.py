@@ -190,16 +190,18 @@ class GoogleCloudSearchClient:
             # Process parts in parallel for better performance
             import concurrent.futures
             
-            def search_single_part_gcs(part):
-                try:
-                    # Build search query
-                    query = f"part_number:{part} AND file_id:{file_id}"
-                    
-                    # Execute search
+            def _iterate_gcs(part: str):
+                """Fetch all pages from GCS for a single part up to limit_per_part."""
+                collected = []
+                next_token = ""
+                remaining = max(0, int(limit_per_part)) if limit_per_part else 10000000
+                while remaining > 0:
+                    page_size = min(remaining, 1000)  # GCS page_size practical cap
                     request = discoveryengine.SearchRequest(
                         serving_config=f"{self.data_store_name}/servingConfigs/default_config",
-                        query=query,
-                        page_size=limit_per_part,
+                        query=f"part_number:{part} AND file_id:{file_id}",
+                        page_size=page_size,
+                        page_token=next_token or None,
                         query_expansion_spec=discoveryengine.SearchRequest.QueryExpansionSpec(
                             mode=discoveryengine.SearchRequest.QueryExpansionSpec.Mode.AUTO
                         ),
@@ -215,27 +217,19 @@ class GoogleCloudSearchClient:
                             )
                         )
                     )
-                    
                     response = self.client.search(request=request)
-                    
-                    # Process results
-                    companies = []
+                    batch = []
                     for result in response.results:
                         struct_data = result.document.struct_data
-                        
-                        # Calculate confidence based on relevance score
                         relevance_score = getattr(result, 'relevance_score', 0.0)
                         confidence = min(100, max(0, relevance_score * 100))
-                        
-                        # Determine match type
                         if relevance_score > 0.9:
                             match_type = "exact"
                         elif relevance_score > 0.7:
                             match_type = "prefix"
                         else:
                             match_type = "fuzzy"
-                        
-                        company_data = {
+                        batch.append({
                             "company_name": struct_data.get("company_name", "N/A"),
                             "contact_details": struct_data.get("contact_details", "N/A"),
                             "email": struct_data.get("email", "N/A"),
@@ -256,8 +250,18 @@ class GoogleCloudSearchClient:
                                 "manufacturer": {"score": 0, "method": "not_calculated", "details": "Skipped for speed"},
                                 "length_penalty": 0
                             }
-                        }
-                        companies.append(company_data)
+                        })
+                    collected.extend(batch)
+                    remaining -= len(batch)
+                    next_token = getattr(response, 'next_page_token', '') or ''
+                    if not next_token or len(batch) == 0:
+                        break
+                return collected
+
+            def search_single_part_gcs(part):
+                try:
+                    # Pull all pages up to limit_per_part
+                    companies = _iterate_gcs(part)
                     
                     if companies:
                         # Calculate price summary
