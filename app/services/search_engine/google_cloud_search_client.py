@@ -21,14 +21,8 @@ class GoogleCloudSearchClient:
         self.project_id = os.getenv("GOOGLE_CLOUD_PROJECT_ID")
         self.index_id = os.getenv("GOOGLE_CLOUD_SEARCH_INDEX_ID", "parts-search-index")
         
-        # Initialize credentials
-        credentials_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-        if credentials_path:
-            credentials = service_account.Credentials.from_service_account_file(credentials_path)
-            self.client = search_v1.SearchServiceClient(credentials=credentials)
-        else:
-            # Use default credentials (for GCP deployment)
-            self.client = search_v1.SearchServiceClient()
+        # Initialize credentials - use default service account for Cloud Run
+        self.client = discoveryengine.SearchServiceClient()
         
         self.index_name = f"projects/{self.project_id}/indexes/{self.index_id}"
         self._is_available = None
@@ -40,7 +34,7 @@ class GoogleCloudSearchClient:
             
         try:
             # Try to get index info
-            request = search_v1.GetIndexRequest(name=self.index_name)
+            request = discoveryengine.GetIndexRequest(name=self.index_name)
             self.client.get_index(request=request)
             self._is_available = True
             logger.info("✅ Google Cloud Search is available")
@@ -55,7 +49,7 @@ class GoogleCloudSearchClient:
         try:
             # Check if index exists
             try:
-                request = search_v1.GetIndexRequest(name=self.index_name)
+                request = discoveryengine.GetIndexRequest(name=self.index_name)
                 self.client.get_index(request=request)
                 logger.info(f"Index {self.index_name} already exists")
                 return True
@@ -63,13 +57,13 @@ class GoogleCloudSearchClient:
                 pass  # Index doesn't exist, create it
             
             # Create index
-            index = search_v1.Index(
+            index = discoveryengine.Index(
                 name=self.index_name,
                 display_name="Parts Search Index",
                 description="Search index for part numbers and company data"
             )
             
-            request = search_v1.CreateIndexRequest(
+            request = discoveryengine.CreateIndexRequest(
                 parent=f"projects/{self.project_id}",
                 index=index
             )
@@ -91,7 +85,7 @@ class GoogleCloudSearchClient:
             
             for i, row in enumerate(data):
                 # Create document for Google Cloud Search
-                doc = search_v1.Document(
+                doc = discoveryengine.Document(
                     name=f"{self.index_name}/documents/{file_id}_{i}",
                     struct_data={
                         "file_id": file_id,
@@ -114,7 +108,7 @@ class GoogleCloudSearchClient:
             chunk_size = 1000
             for i in range(0, len(documents), chunk_size):
                 chunk = documents[i:i + chunk_size]
-                request = search_v1.BatchCreateDocumentsRequest(
+                request = discoveryengine.BatchCreateDocumentsRequest(
                     parent=self.index_name,
                     documents=chunk
                 )
@@ -141,11 +135,24 @@ class GoogleCloudSearchClient:
                 query = f"part_number:{part} AND file_id:{file_id}"
                 
                 # Execute search
-                request = search_v1.SearchRequest(
-                    name=self.index_name,
+                request = discoveryengine.SearchRequest(
+                    serving_config=f"projects/{self.project_id}/locations/global/dataStores/{self.index_id}/servingConfigs/default_config",
                     query=query,
                     page_size=limit_per_part,
-                    order_by="relevance_score desc"
+                    query_expansion_spec=discoveryengine.SearchRequest.QueryExpansionSpec(
+                        mode=discoveryengine.SearchRequest.QueryExpansionSpec.Mode.AUTO
+                    ),
+                    spell_correction_spec=discoveryengine.SearchRequest.SpellCorrectionSpec(
+                        mode=discoveryengine.SearchRequest.SpellCorrectionSpec.Mode.AUTO
+                    ),
+                    content_search_spec=discoveryengine.SearchRequest.ContentSearchSpec(
+                        extractive_content_spec=discoveryengine.SearchRequest.ContentSearchSpec.ExtractiveContentSpec(
+                            max_extractive_answer_count=1
+                        ),
+                        snippet_spec=discoveryengine.SearchRequest.ContentSearchSpec.SnippetSpec(
+                            return_snippets=True
+                        )
+                    )
                 )
                 
                 response = self.client.search(request=request)
@@ -269,11 +276,24 @@ class GoogleCloudSearchClient:
             query = f"part_number:{part_number} AND file_id:{file_id}"
             
             # Execute search
-            request = search_v1.SearchRequest(
-                name=self.index_name,
+            request = discoveryengine.SearchRequest(
+                serving_config=f"projects/{self.project_id}/locations/global/dataStores/{self.index_id}/servingConfigs/default_config",
                 query=query,
                 page_size=page_size if not show_all else 1000,
-                order_by="relevance_score desc"
+                query_expansion_spec=discoveryengine.SearchRequest.QueryExpansionSpec(
+                    mode=discoveryengine.SearchRequest.QueryExpansionSpec.Mode.AUTO
+                ),
+                spell_correction_spec=discoveryengine.SearchRequest.SpellCorrectionSpec(
+                    mode=discoveryengine.SearchRequest.SpellCorrectionSpec.Mode.AUTO
+                ),
+                content_search_spec=discoveryengine.SearchRequest.ContentSearchSpec(
+                    extractive_content_spec=discoveryengine.SearchRequest.ContentSearchSpec.ExtractiveContentSpec(
+                        max_extractive_answer_count=1
+                    ),
+                    snippet_spec=discoveryengine.SearchRequest.ContentSearchSpec.SnippetSpec(
+                        return_snippets=True
+                    )
+                )
             )
             
             response = self.client.search(request=request)
