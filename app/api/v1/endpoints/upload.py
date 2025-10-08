@@ -161,3 +161,61 @@ async def delete_file(file_id: int, db: Session = Depends(get_db), user=Depends(
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Delete failed: {e}")
 
 
+@router.patch("/{file_id}/reset")
+async def reset_stuck_file(file_id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    """Reset a stuck file status to allow new uploads."""
+    log = logging.getLogger("upload")
+    
+    # Get the file record
+    file_obj = db.get(FileModel, file_id)
+    if not file_obj:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
+    
+    try:
+        # Only reset if file is stuck in processing state
+        if file_obj.status == "processing":
+            file_obj.status = "failed"
+            db.add(file_obj)
+            db.commit()
+            
+            log.info(f"Reset stuck file {file_id} status from 'processing' to 'failed'")
+            return {"message": f"File {file_id} status reset successfully", "new_status": "failed"}
+        else:
+            return {"message": f"File {file_id} is not stuck (current status: {file_obj.status})", "current_status": file_obj.status}
+        
+    except Exception as e:
+        db.rollback()
+        log.error(f"Failed to reset file {file_id}: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Reset failed: {e}")
+
+
+@router.get("/stuck")
+async def list_stuck_files(db: Session = Depends(get_db), user=Depends(get_current_user)):
+    """List files that are stuck in processing state."""
+    log = logging.getLogger("upload")
+    
+    try:
+        # Find files stuck in processing for more than 10 minutes
+        stuck_files = db.query(FileModel).filter(
+            FileModel.status == "processing"
+        ).all()
+        
+        result = []
+        for file_obj in stuck_files:
+            result.append({
+                "id": file_obj.id,
+                "filename": file_obj.filename,
+                "status": file_obj.status,
+                "size_bytes": file_obj.size_bytes,
+                "content_type": file_obj.content_type,
+                "rows_count": file_obj.rows_count
+            })
+        
+        log.info(f"Found {len(result)} stuck files")
+        return {"stuck_files": result, "count": len(result)}
+        
+    except Exception as e:
+        log.error(f"Failed to list stuck files: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to list stuck files: {e}")
+
+
