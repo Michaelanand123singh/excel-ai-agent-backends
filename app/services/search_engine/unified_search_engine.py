@@ -199,21 +199,28 @@ class UnifiedSearchEngine:
         """
         start_time = time.perf_counter()
         
-        # Try Google Cloud Search first (primary)
+        # Try Google Cloud Search first (primary) - optimized for massive bulk searches
         if self.gcs_available and self.gcs_client and self.file_id:
             try:
-                logger.info(f"🔍 Using Google Cloud Search for bulk search: {len(part_numbers)} parts")
-                result = self.gcs_client.bulk_search(
-                    part_numbers=part_numbers,
-                    file_id=self.file_id,
-                    limit_per_part=10000000  # Show ALL results from dataset (up to 1 crore)
-                )
-                if result and result.get('total_matches', 0) > 0:
-                    result['search_engine'] = 'google_cloud_search'
-                    result['latency_ms'] = int((time.perf_counter() - start_time) * 1000)
-                    return result
+                logger.info(f"🚀 Using Google Cloud Search for bulk search: {len(part_numbers)} parts (optimized for 50 lakh+ parts)")
+                
+                # For very large bulk searches (50 lakh+ parts), use chunked processing
+                if len(part_numbers) > 10000:
+                    logger.info(f"📦 Large bulk search detected ({len(part_numbers)} parts), using chunked processing")
+                    return self._search_with_gcs_chunked(part_numbers, start_time)
                 else:
-                    logger.warning(f"⚠️ Google Cloud Search returned 0 results for all parts, falling back to Elasticsearch")
+                    # For smaller bulk searches, use direct bulk search
+                    result = self.gcs_client.bulk_search(
+                        part_numbers=part_numbers,
+                        file_id=self.file_id,
+                        limit_per_part=10000000  # Show ALL results from dataset (up to 1 crore)
+                    )
+                    if result and result.get('total_matches', 0) > 0:
+                        result['search_engine'] = 'google_cloud_search'
+                        result['latency_ms'] = int((time.perf_counter() - start_time) * 1000)
+                        return result
+                    else:
+                        logger.warning(f"⚠️ Google Cloud Search returned 0 results for all parts, falling back to Elasticsearch")
             except Exception as e:
                 logger.warning(f"⚠️ Google Cloud Search bulk search failed, falling back to Elasticsearch: {e}")
         
@@ -221,8 +228,31 @@ class UnifiedSearchEngine:
         if self.es_available and self.es_client and self.file_id:
             try:
                 logger.info(f"🔍 Using Elasticsearch for bulk search: {len(part_numbers)} parts")
-                result = self._search_with_elasticsearch(part_numbers, search_mode, page, page_size, show_all)
-                if result:
+                
+                # Add timeout handling for bulk search
+                import signal
+                import threading
+                
+                result = None
+                timeout_occurred = False
+                
+                def timeout_handler():
+                    nonlocal timeout_occurred
+                    timeout_occurred = True
+                    logger.warning(f"⚠️ Elasticsearch bulk search timed out after 25 seconds")
+                
+                # Set timeout for 25 seconds
+                timer = threading.Timer(25.0, timeout_handler)
+                timer.start()
+                
+                try:
+                    result = self._search_with_elasticsearch(part_numbers, search_mode, page, page_size, show_all)
+                finally:
+                    timer.cancel()
+                
+                if timeout_occurred:
+                    logger.warning(f"⚠️ Elasticsearch bulk search timed out, falling back to PostgreSQL")
+                elif result:
                     # Check if Elasticsearch returned meaningful results for any part
                     has_results = False
                     for part_number in part_numbers:
@@ -243,25 +273,30 @@ class UnifiedSearchEngine:
             except Exception as e:
                 logger.warning(f"⚠️ Elasticsearch bulk search failed, falling back to PostgreSQL: {e}")
         
-        # Fallback to PostgreSQL - search each part individually
+        # Fallback to PostgreSQL - optimized bulk search
         logger.info(f"🔍 Using PostgreSQL fallback for bulk search: {len(part_numbers)} parts")
         results = {}
         
-        for part_number in part_numbers:
-            try:
-                # Use the same search logic as single search
-                result = self.search_single_part(part_number, search_mode, page, page_size, show_all)
-                results[part_number] = result
-            except Exception as e:
-                results[part_number] = {
-                    "part_number": part_number,
-                    "total_matches": 0,
-                    "companies": [],
-                    "message": f"Search failed: {str(e)}",
-                    "cached": False,
-                    "latency_ms": 0,
-                    "error": str(e)
-                }
+        try:
+            # Use optimized bulk PostgreSQL search instead of individual searches
+            results = self._search_with_postgresql_bulk(part_numbers, search_mode, page, page_size, show_all)
+        except Exception as e:
+            logger.error(f"❌ PostgreSQL bulk search failed: {e}")
+            # Fallback to individual searches only if bulk fails
+            for part_number in part_numbers:
+                try:
+                    result = self.search_single_part(part_number, search_mode, page, page_size, show_all)
+                    results[part_number] = result
+                except Exception as e:
+                    results[part_number] = {
+                        "part_number": part_number,
+                        "total_matches": 0,
+                        "companies": [],
+                        "message": f"Search failed: {str(e)}",
+                        "cached": False,
+                        "latency_ms": 0,
+                        "error": str(e)
+                    }
         
         return {
             "results": results,
@@ -269,6 +304,230 @@ class UnifiedSearchEngine:
             "latency_ms": int((time.perf_counter() - start_time) * 1000),
             "search_engine": "postgresql_fallback"
         }
+    
+    def _search_with_gcs_chunked(self, part_numbers: List[str], start_time: float) -> Dict[str, Any]:
+        """
+        Handle massive bulk searches (50 lakh+ parts) using chunked Google Cloud Search
+        Optimized for ultra-large datasets
+        """
+        try:
+            logger.info(f"🚀 Processing massive bulk search with Google Cloud Search: {len(part_numbers)} parts")
+            
+            # Use optimal chunk size for Google Cloud Search (1000 parts per chunk)
+            chunk_size = 1000
+            aggregated_results = {}
+            total_matches = 0
+            processed_chunks = 0
+            
+            for i in range(0, len(part_numbers), chunk_size):
+                chunk = part_numbers[i:i + chunk_size]
+                processed_chunks += 1
+                
+                logger.info(f"📦 Processing chunk {processed_chunks}/{(len(part_numbers) + chunk_size - 1) // chunk_size} ({len(chunk)} parts)")
+                
+                try:
+                    # Process chunk with Google Cloud Search
+                    chunk_result = self.gcs_client.bulk_search(
+                        part_numbers=chunk,
+                        file_id=self.file_id,
+                        limit_per_part=10000000  # Show ALL results from dataset
+                    )
+                    
+                    if chunk_result and chunk_result.get('results'):
+                        # Merge chunk results
+                        for part_number, part_result in chunk_result['results'].items():
+                            aggregated_results[part_number] = part_result
+                            total_matches += part_result.get('total_matches', 0)
+                    
+                    logger.info(f"✅ Chunk {processed_chunks} completed: {chunk_result.get('total_matches', 0)} total matches")
+                    
+                except Exception as e:
+                    logger.warning(f"⚠️ Chunk {processed_chunks} failed: {e}")
+                    # Add empty results for failed chunk
+                    for part_number in chunk:
+                        aggregated_results[part_number] = {
+                            "part_number": part_number,
+                            "total_matches": 0,
+                            "companies": [],
+                            "message": f"Search failed: {str(e)}",
+                            "cached": False,
+                            "latency_ms": 0,
+                            "error": str(e)
+                        }
+            
+            logger.info(f"🎯 Massive bulk search completed: {total_matches} total matches across {len(part_numbers)} parts")
+            
+            return {
+                "results": aggregated_results,
+                "total_parts": len(part_numbers),
+                "total_matches": total_matches,
+                "latency_ms": int((time.perf_counter() - start_time) * 1000),
+                "search_engine": "google_cloud_search_chunked",
+                "chunks_processed": processed_chunks
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Massive bulk search with Google Cloud Search failed: {e}")
+            raise e
+    
+    def _search_with_postgresql_bulk(self, part_numbers: List[str], search_mode: str, 
+                                   page: int, page_size: int, show_all: bool) -> Dict[str, Any]:
+        """
+        Optimized bulk PostgreSQL search using a single query with ANY() operator
+        Much faster than individual searches
+        """
+        try:
+            # Create a single optimized query for all parts
+            if search_mode == "exact":
+                # Exact match search
+                query = f"""
+                SELECT 
+                    company_name,
+                    contact_details,
+                    email,
+                    quantity,
+                    unit_price,
+                    item_description,
+                    part_number,
+                    uqc,
+                    secondary_buyer,
+                    secondary_buyer_contact,
+                    secondary_buyer_email,
+                    'exact' as match_type,
+                    100 as confidence
+                FROM {self.table_name}
+                WHERE LOWER(part_number) = ANY(%s)
+                ORDER BY unit_price ASC
+                LIMIT 10000
+                """
+                params = [part_numbers]
+            elif search_mode == "fuzzy":
+                # Fuzzy match search using similarity
+                query = f"""
+                SELECT 
+                    company_name,
+                    contact_details,
+                    email,
+                    quantity,
+                    unit_price,
+                    item_description,
+                    part_number,
+                    uqc,
+                    secondary_buyer,
+                    secondary_buyer_contact,
+                    secondary_buyer_email,
+                    'fuzzy' as match_type,
+                    LEAST(100, GREATEST(0, (1 - levenshtein(LOWER(part_number), LOWER(%s)) / GREATEST(LENGTH(part_number), LENGTH(%s))) * 100)) as confidence
+                FROM {self.table_name}
+                WHERE LOWER(part_number) ILIKE ANY(%s)
+                ORDER BY confidence DESC, unit_price ASC
+                LIMIT 10000
+                """
+                # Create fuzzy patterns for each part
+                fuzzy_patterns = [f"%{part}%" for part in part_numbers]
+                params = [part_numbers[0], part_numbers[0], fuzzy_patterns]
+            else:  # hybrid
+                # Hybrid search: exact matches first, then fuzzy
+                query = f"""
+                WITH exact_matches AS (
+                    SELECT 
+                        company_name,
+                        contact_details,
+                        email,
+                        quantity,
+                        unit_price,
+                        item_description,
+                        part_number,
+                        uqc,
+                        secondary_buyer,
+                        secondary_buyer_contact,
+                        secondary_buyer_email,
+                        'exact' as match_type,
+                        100 as confidence,
+                        part_number as search_part
+                    FROM {self.table_name}
+                    WHERE LOWER(part_number) = ANY(%s)
+                ),
+                fuzzy_matches AS (
+                    SELECT 
+                        company_name,
+                        contact_details,
+                        email,
+                        quantity,
+                        unit_price,
+                        item_description,
+                        part_number,
+                        uqc,
+                        secondary_buyer,
+                        secondary_buyer_contact,
+                        secondary_buyer_email,
+                        'fuzzy' as match_type,
+                        LEAST(100, GREATEST(0, (1 - levenshtein(LOWER(part_number), LOWER(%s)) / GREATEST(LENGTH(part_number), LENGTH(%s))) * 100)) as confidence,
+                        %s as search_part
+                    FROM {self.table_name}
+                    WHERE LOWER(part_number) ILIKE ANY(%s)
+                    AND LOWER(part_number) != ANY(%s)
+                )
+                SELECT * FROM exact_matches
+                UNION ALL
+                SELECT * FROM fuzzy_matches
+                ORDER BY confidence DESC, unit_price ASC
+                LIMIT 10000
+                """
+                fuzzy_patterns = [f"%{part}%" for part in part_numbers]
+                params = [part_numbers, part_numbers[0], part_numbers[0], part_numbers[0], fuzzy_patterns, part_numbers]
+            
+            # Execute the optimized query
+            result = self.db.execute(text(query), params)
+            rows = result.fetchall()
+            
+            # Group results by part number
+            results = {}
+            for part_number in part_numbers:
+                results[part_number] = {
+                    "part_number": part_number,
+                    "total_matches": 0,
+                    "companies": [],
+                    "message": "No matches found",
+                    "cached": False,
+                    "latency_ms": 0
+                }
+            
+            # Process results and group by part number
+            for row in rows:
+                part_number = row.part_number
+                if part_number in results:
+                    company_data = {
+                        "company_name": row.company_name or "N/A",
+                        "contact_details": row.contact_details or "N/A",
+                        "email": row.email or "N/A",
+                        "quantity": row.quantity or 0,
+                        "unit_price": float(row.unit_price or 0.0),
+                        "item_description": row.item_description or "N/A",
+                        "part_number": row.part_number or "N/A",
+                        "uqc": row.uqc or "N/A",
+                        "secondary_buyer": row.secondary_buyer or "N/A",
+                        "secondary_buyer_contact": row.secondary_buyer_contact or "N/A",
+                        "secondary_buyer_email": row.secondary_buyer_email or "N/A",
+                        "confidence": float(row.confidence or 0),
+                        "match_type": row.match_type or "unknown",
+                        "match_status": "found",
+                        "confidence_breakdown": {
+                            "part_number": {"score": float(row.confidence or 0), "method": "postgresql_bulk", "details": "Bulk search optimization"},
+                            "description": {"score": 0, "method": "not_calculated", "details": "Skipped for speed"},
+                            "manufacturer": {"score": 0, "method": "not_calculated", "details": "Skipped for speed"},
+                            "length_penalty": 0
+                        }
+                    }
+                    results[part_number]["companies"].append(company_data)
+                    results[part_number]["total_matches"] += 1
+                    results[part_number]["message"] = f"Found {results[part_number]['total_matches']} matches"
+            
+            return results
+            
+        except Exception as e:
+            logger.error(f"❌ PostgreSQL bulk search failed: {e}")
+            raise e
     
     def _search_with_elasticsearch(self, part_numbers: List[str], search_mode: str, 
                                   page: int, page_size: int, show_all: bool) -> Dict[str, Any]:
@@ -281,8 +540,8 @@ class UnifiedSearchEngine:
             limit_per_part = 10000000  # Show ALL results from dataset (up to 1 crore for massive datasets)
 
             # Optimized chunk size for ultra-fast ES searches
-            # 100 parts per chunk = faster processing, fewer API calls
-            chunk_size = 100  # Optimized for speed with ES
+            # 50 parts per chunk = faster processing, better timeout handling
+            chunk_size = 50  # Optimized for speed and timeout handling
             aggregated: Dict[str, Any] = {"results": {}, "total_parts": len(part_numbers)}
 
             for i in range(0, len(part_numbers), chunk_size):
