@@ -8,7 +8,7 @@ import json
 import time
 import logging
 from typing import List, Dict, Any, Optional
-from google.cloud import search_v1
+from google.cloud import discoveryengine_v1beta as discoveryengine
 from google.oauth2 import service_account
 import os
 
