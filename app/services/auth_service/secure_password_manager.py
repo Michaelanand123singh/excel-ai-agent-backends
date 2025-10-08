@@ -34,16 +34,22 @@ class SecurePasswordManager:
     """
     
     def __init__(self):
-        # Configure Argon2id with secure parameters
+        # Configure Argon2id with secure yet fast parameters
+        # Tunable via environment variables for ops flexibility
+        import os
+        memory_cost = int(os.getenv("ARGON2_MEMORY_COST", "32768"))  # 32 MB (was 64 MB)
+        time_cost = int(os.getenv("ARGON2_TIME_COST", "2"))          # 2 iterations (was 3)
+        parallelism = int(os.getenv("ARGON2_PARALLELISM", "2"))       # 2 threads (was 4)
+
         self._context = CryptContext(
             schemes=["argon2"],
             default="argon2",
-            argon2__memory_cost=65536,  # 64 MB memory usage
-            argon2__time_cost=3,        # 3 iterations
-            argon2__parallelism=4,      # 4 parallel threads
-            argon2__hash_len=32,        # 32-byte hash
-            argon2__salt_len=16,        # 16-byte salt
-            deprecated="auto"           # Auto-upgrade old hashes
+            argon2__memory_cost=memory_cost,
+            argon2__time_cost=time_cost,
+            argon2__parallelism=parallelism,
+            argon2__hash_len=32,
+            argon2__salt_len=16,
+            deprecated="auto"
         )
         
         # Password validation rules
