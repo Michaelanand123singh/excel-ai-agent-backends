@@ -20,22 +20,69 @@ class GoogleCloudSearchClient:
     def __init__(self):
         self.project_id = os.getenv("GOOGLE_CLOUD_PROJECT_ID")
         self.index_id = os.getenv("GOOGLE_CLOUD_SEARCH_INDEX_ID", "parts-search-index")
-        
-        # Initialize credentials - use default service account for Cloud Run
-        self.client = discoveryengine.SearchServiceClient()
-        
-        self.index_name = f"projects/{self.project_id}/indexes/{self.index_id}"
+        self.client = None
         self._is_available = None
+        
+        # Validate required environment variables
+        if not self.project_id:
+            logger.warning("⚠️ GOOGLE_CLOUD_PROJECT_ID not set, Google Cloud Search will not be available")
+            return
+        
+        try:
+            # Initialize credentials - handle both file path and JSON content
+            credentials_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+            
+            if credentials_path:
+                # Check if it's a file path or JSON content
+                if credentials_path.startswith('{'):
+                    # It's JSON content, not a file path
+                    import json
+                    from google.oauth2 import service_account
+                    try:
+                        credentials_info = json.loads(credentials_path)
+                        credentials = service_account.Credentials.from_service_account_info(credentials_info)
+                        self.client = discoveryengine.SearchServiceClient(credentials=credentials)
+                        logger.info("✅ Using service account from JSON content")
+                    except Exception as e:
+                        logger.warning(f"⚠️ Failed to parse JSON credentials, using default: {e}")
+                        self.client = discoveryengine.SearchServiceClient()
+                elif os.path.exists(credentials_path):
+                    # It's a valid file path
+                    from google.oauth2 import service_account
+                    credentials = service_account.Credentials.from_service_account_file(credentials_path)
+                    self.client = discoveryengine.SearchServiceClient(credentials=credentials)
+                    logger.info("✅ Using service account from file")
+                else:
+                    # File doesn't exist, use default
+                    logger.warning(f"⚠️ Credentials file not found: {credentials_path}, using default service account")
+                    self.client = discoveryengine.SearchServiceClient()
+            else:
+                # No credentials specified, use default service account for Cloud Run
+                self.client = discoveryengine.SearchServiceClient()
+                logger.info("✅ Using default service account for Cloud Run")
+            
+            # Use data store format for Discovery Engine API
+            self.data_store_name = f"projects/{self.project_id}/locations/global/dataStores/{self.index_id}"
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to initialize Google Cloud Search client: {e}")
+            self.client = None
     
     def is_available(self) -> bool:
         """Check if Google Cloud Search is available"""
         if self._is_available is not None:
             return self._is_available
+        
+        # Check if client was initialized successfully
+        if not self.client:
+            self._is_available = False
+            logger.warning("⚠️ Google Cloud Search client not initialized")
+            return False
             
         try:
-            # Try to get index info
-            request = discoveryengine.GetIndexRequest(name=self.index_name)
-            self.client.get_index(request=request)
+            # Try to get data store info
+            request = discoveryengine.GetDataStoreRequest(name=self.data_store_name)
+            self.client.get_data_store(request=request)
             self._is_available = True
             logger.info("✅ Google Cloud Search is available")
             return True
@@ -45,48 +92,58 @@ class GoogleCloudSearchClient:
             return False
     
     def create_index(self, table_name: str, file_id: int) -> bool:
-        """Create search index for part numbers"""
+        """Create data store for part numbers (Discovery Engine API)"""
+        if not self.client:
+            logger.warning("⚠️ Google Cloud Search client not available")
+            return False
+            
         try:
-            # Check if index exists
+            # Check if data store exists
             try:
-                request = discoveryengine.GetIndexRequest(name=self.index_name)
-                self.client.get_index(request=request)
-                logger.info(f"Index {self.index_name} already exists")
+                request = discoveryengine.GetDataStoreRequest(name=self.data_store_name)
+                self.client.get_data_store(request=request)
+                logger.info(f"Data store {self.data_store_name} already exists")
                 return True
             except:
-                pass  # Index doesn't exist, create it
+                pass  # Data store doesn't exist, create it
             
-            # Create index
-            index = discoveryengine.Index(
-                name=self.index_name,
-                display_name="Parts Search Index",
-                description="Search index for part numbers and company data"
+            # Create data store
+            data_store = discoveryengine.DataStore(
+                display_name="Parts Search Data Store",
+                industry_vertical=discoveryengine.IndustryVertical.GENERIC,
+                content_config=discoveryengine.DataStore.ContentConfig.CONTENT_REQUIRED,
+                solution_types=[discoveryengine.SolutionType.SOLUTION_TYPE_SEARCH]
             )
             
-            request = discoveryengine.CreateIndexRequest(
-                parent=f"projects/{self.project_id}",
-                index=index
+            request = discoveryengine.CreateDataStoreRequest(
+                parent=f"projects/{self.project_id}/locations/global",
+                data_store=data_store,
+                data_store_id=self.index_id
             )
             
-            operation = self.client.create_index(request=request)
+            operation = self.client.create_data_store(request=request)
             operation.result()  # Wait for completion
             
-            logger.info(f"✅ Created Google Cloud Search index: {self.index_name}")
+            logger.info(f"✅ Created Google Cloud Search data store: {self.data_store_name}")
             return True
             
         except Exception as e:
-            logger.error(f"❌ Failed to create index: {e}")
+            logger.error(f"❌ Failed to create data store: {e}")
             return False
     
     def index_data(self, data: List[Dict[str, Any]], file_id: int) -> bool:
         """Index part number data to Google Cloud Search"""
+        if not self.client:
+            logger.warning("⚠️ Google Cloud Search client not available")
+            return False
+            
         try:
             documents = []
             
             for i, row in enumerate(data):
                 # Create document for Google Cloud Search
                 doc = discoveryengine.Document(
-                    name=f"{self.index_name}/documents/{file_id}_{i}",
+                    name=f"{self.data_store_name}/documents/{file_id}_{i}",
                     struct_data={
                         "file_id": file_id,
                         "part_number": row.get("part_number", ""),
@@ -109,7 +166,7 @@ class GoogleCloudSearchClient:
             for i in range(0, len(documents), chunk_size):
                 chunk = documents[i:i + chunk_size]
                 request = discoveryengine.BatchCreateDocumentsRequest(
-                    parent=self.index_name,
+                    parent=self.data_store_name,
                     documents=chunk
                 )
                 
@@ -125,6 +182,10 @@ class GoogleCloudSearchClient:
     
     def bulk_search(self, part_numbers: List[str], file_id: int, limit_per_part: int = 20) -> Dict[str, Any]:
         """Perform ultra-fast bulk search using Google Cloud Search"""
+        if not self.client:
+            logger.warning("⚠️ Google Cloud Search client not available")
+            raise Exception("Google Cloud Search client not available")
+            
         try:
             start_time = time.perf_counter()
             results = {}
@@ -136,7 +197,7 @@ class GoogleCloudSearchClient:
                 
                 # Execute search
                 request = discoveryengine.SearchRequest(
-                    serving_config=f"projects/{self.project_id}/locations/global/dataStores/{self.index_id}/servingConfigs/default_config",
+                    serving_config=f"{self.data_store_name}/servingConfigs/default_config",
                     query=query,
                     page_size=limit_per_part,
                     query_expansion_spec=discoveryengine.SearchRequest.QueryExpansionSpec(
@@ -269,6 +330,10 @@ class GoogleCloudSearchClient:
     def search_single_part(self, part_number: str, file_id: int, search_mode: str = "hybrid", 
                           page: int = 1, page_size: int = 50, show_all: bool = False) -> Dict[str, Any]:
         """Search for a single part number using Google Cloud Search"""
+        if not self.client:
+            logger.warning("⚠️ Google Cloud Search client not available")
+            raise Exception("Google Cloud Search client not available")
+            
         try:
             start_time = time.perf_counter()
             
@@ -277,7 +342,7 @@ class GoogleCloudSearchClient:
             
             # Execute search
             request = discoveryengine.SearchRequest(
-                serving_config=f"projects/{self.project_id}/locations/global/dataStores/{self.index_id}/servingConfigs/default_config",
+                serving_config=f"{self.data_store_name}/servingConfigs/default_config",
                 query=query,
                 page_size=page_size if not show_all else 1000,
                 query_expansion_spec=discoveryengine.SearchRequest.QueryExpansionSpec(
