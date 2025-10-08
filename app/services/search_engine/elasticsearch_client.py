@@ -167,7 +167,7 @@ class ElasticsearchBulkSearch:
                 # Add index specification
                 msearch_body.append({"index": self.index_name})
                 
-                # Add search query - Focus on part number matching only
+                # Optimized query for ultra-fast ES searches
                 search_query = {
                     "query": {
                         "bool": {
@@ -175,56 +175,44 @@ class ElasticsearchBulkSearch:
                                 {"term": {"file_id": file_id}}
                             ],
                             "should": [
+                                # Exact match first (fastest)
                                 {
                                     "term": {
                                         "part_number.keyword": {
                                             "value": part,
-                                            "boost": 3.0
+                                            "boost": 10.0
                                         }
                                     }
                                 },
+                                # Prefix match (fast)
+                                {
+                                    "prefix": {
+                                        "part_number.keyword": {
+                                            "value": part,
+                                            "boost": 5.0
+                                        }
+                                    }
+                                },
+                                # Fuzzy match only if needed (slower but more flexible)
                                 {
                                     "match": {
                                         "part_number": {
                                             "query": part,
                                             "boost": 2.0,
-                                            "fuzziness": "AUTO"
-                                        }
-                                    }
-                                },
-                                {
-                                    "wildcard": {
-                                        "part_number": {
-                                            "value": f"*{part}*",
-                                            "boost": 1.0
-                                        }
-                                    }
-                                },
-                                {
-                                    "wildcard": {
-                                        "part_number": {
-                                            "value": f"{part}*",
-                                            "boost": 1.5
-                                        }
-                                    }
-                                },
-                                {
-                                    "wildcard": {
-                                        "part_number": {
-                                            "value": f"*{part}",
-                                            "boost": 1.5
+                                            "fuzziness": 1,
+                                            "operator": "and"
                                         }
                                     }
                                 }
                             ],
-                            "minimum_should_match": 1  # Require at least one part number match
+                            "minimum_should_match": 1
                         }
                     },
                     "track_total_hits": False,
                     "_source": {
                         "includes": [
                             "company_name",
-                            "contact_details",
+                            "contact_details", 
                             "email",
                             "quantity",
                             "unit_price",
@@ -236,7 +224,7 @@ class ElasticsearchBulkSearch:
                             "secondary_buyer_email"
                         ]
                     },
-                    "size": limit_per_part,
+                    "size": min(limit_per_part, 20),  # Reduced to 20 for speed
                     "sort": [
                         {"_score": {"order": "desc"}},
                         {"unit_price": {"order": "asc"}}
@@ -261,25 +249,19 @@ class ElasticsearchBulkSearch:
                     
                     for hit in hits:
                         source = hit['_source']
+                        score = hit.get('_score', 0)
                         
-                        # Calculate confidence score using the same logic as single search
-                        from app.services.query_engine.confidence_calculator import confidence_calculator
+                        # Fast confidence estimation based on ES score
+                        # ES score already includes relevance, so use it directly
+                        confidence = min(100, max(0, (score / 10) * 100))  # Convert ES score to 0-100%
                         
-                        confidence_data = confidence_calculator.calculate_confidence(
-                            search_part=part,
-                            search_name=part,  # Using part number as search name for bulk search
-                            search_manufacturer="",  # No manufacturer search in bulk
-                            db_record=source
-                        )
-                        
-                        # Include all results with any meaningful similarity
-                        # Check if there's any part number or description similarity
-                        part_score = confidence_data["breakdown"]["part_number"]["score"]
-                        desc_score = confidence_data["breakdown"]["description"]["score"]
-                        
-                        # Include if there's any meaningful similarity (lowered threshold)
-                        if part_score < 0.1 and desc_score < 0.1:  # Only exclude if absolutely no similarity
-                            continue
+                        # Simple match type based on score
+                        if score > 8:
+                            match_type = "exact"
+                        elif score > 4:
+                            match_type = "prefix"
+                        else:
+                            match_type = "fuzzy"
                         
                         company_data = {
                             "company_name": source.get("company_name", "N/A"),
@@ -293,10 +275,15 @@ class ElasticsearchBulkSearch:
                             "secondary_buyer": source.get("secondary_buyer", "N/A"),
                             "secondary_buyer_contact": source.get("secondary_buyer_contact", "N/A"),
                             "secondary_buyer_email": source.get("secondary_buyer_email", "N/A"),
-                            "confidence": confidence_data["confidence"],
-                            "match_type": confidence_data["match_type"],
-                            "match_status": confidence_data["match_status"],
-                            "confidence_breakdown": confidence_data["breakdown"]
+                            "confidence": confidence,
+                            "match_type": match_type,
+                            "match_status": "found",
+                            "confidence_breakdown": {
+                                "part_number": {"score": confidence, "method": "elasticsearch_score", "details": f"ES score: {score}"},
+                                "description": {"score": 0, "method": "not_calculated", "details": "Skipped for speed"},
+                                "manufacturer": {"score": 0, "method": "not_calculated", "details": "Skipped for speed"},
+                                "length_penalty": 0
+                            }
                         }
                         companies.append(company_data)
                     

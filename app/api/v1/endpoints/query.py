@@ -106,7 +106,7 @@ async def search_part_number_bulk(req: BulkPartSearchRequest, db: Session = Depe
     if not req.part_numbers:
         return {"results": {}, "total_parts": 0, "latency_ms": 0}
 
-    # Normalize and de-dup small list first
+    # Normalize and de-dup list first - support up to 1 lakh parts
     normalized = []
     seen = set()
     for pn in req.part_numbers:
@@ -114,6 +114,10 @@ async def search_part_number_bulk(req: BulkPartSearchRequest, db: Session = Depe
         if len(v) >= 2 and v.lower() not in seen:
             seen.add(v.lower())
             normalized.append(v)
+    
+    # Limit to 1 lakh parts for performance
+    if len(normalized) > 100000:
+        normalized = normalized[:100000]
 
     if not normalized:
         return {"results": {}, "total_parts": 0, "latency_ms": int((time.perf_counter() - start_time) * 1000)}
@@ -259,7 +263,7 @@ async def search_part_number_bulk_upload(file_id: int = Form(...), file: UploadF
                 seen.add(k)
                 unique_parts.append(p)
 
-        parts = unique_parts[:10000]
+        parts = unique_parts[:100000]  # Support up to 1 lakh parts for bulk upload
     except HTTPException:
         raise
     except Exception as e:

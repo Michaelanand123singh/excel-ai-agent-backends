@@ -65,7 +65,7 @@ class Settings(BaseSettings):
     ES_PASSWORD: Optional[str] = os.getenv("ES_PASSWORD")
     ES_API_KEY: Optional[str] = os.getenv("ES_API_KEY")  # Base64 API key (id:api_key)
     ES_INDEX_PREFIX: str = os.getenv("ES_INDEX_PREFIX", "parts_search")
-    ES_TIMEOUT_MS: int = int(os.getenv("ES_TIMEOUT_MS", "5000"))
+    ES_TIMEOUT_MS: int = int(os.getenv("ES_TIMEOUT_MS", "30000"))
 
     # Ingestion tuning
     INGEST_BATCH_SIZE: int = 5000
