@@ -1,4 +1,4 @@
-from fastapi import APIRouter, UploadFile, File, BackgroundTasks, Depends, HTTPException, status
+from fastapi import APIRouter, UploadFile, File, BackgroundTasks, Depends, HTTPException, status, Body, Query
 import logging
 from sqlalchemy.orm import Session
 from sqlalchemy import text
@@ -21,6 +21,221 @@ def _process_file_background(file_id: int) -> None:
     # Legacy placeholder kept for compatibility
     return None
 
+
+# In-memory upload session registry for chunked uploads (Cloud Run safe within instance)
+# Maps upload_id -> { file_id, tmp_path, filename, content_type, received_bytes, created_at }
+_multipart_sessions: dict[str, dict] = {}
+
+# Cleanup old sessions (older than 1 hour)
+def cleanup_old_sessions():
+    import time
+    current_time = time.time()
+    expired_sessions = []
+    for upload_id, session in _multipart_sessions.items():
+        created_at = session.get('created_at', current_time)
+        if current_time - created_at > 3600:  # 1 hour
+            expired_sessions.append(upload_id)
+    
+    for upload_id in expired_sessions:
+        try:
+            import os
+            tmp_path = _multipart_sessions[upload_id].get('tmp_path')
+            if tmp_path and os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+        finally:
+            _multipart_sessions.pop(upload_id, None)
+
+
+@router.post("/multipart/init")
+async def multipart_init(
+    filename: str = Body(...),
+    content_type: str = Body("application/octet-stream"),
+    total_size: int | None = Body(None),
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    """Initialize a chunked upload session. Returns upload_id and file_id.
+    Chunks must be POSTed to /multipart/part with the same upload_id.
+    """
+    import uuid, os, time
+    try:
+        # Cleanup old sessions first
+        cleanup_old_sessions()
+        
+        # Create file record immediately to track progress
+        obj = FileModel(
+            filename=filename,
+            size_bytes=0,
+            content_type=content_type or "application/octet-stream",
+            status="uploaded",
+        )
+        db.add(obj)
+        db.commit()
+        db.refresh(obj)
+
+        upload_id = uuid.uuid4().hex
+        tmp_path = f"/tmp/upload_{upload_id}.part"
+        # Ensure empty file
+        with open(tmp_path, "wb") as f:
+            pass
+        _multipart_sessions[upload_id] = {
+            "file_id": obj.id,
+            "tmp_path": tmp_path,
+            "filename": filename,
+            "content_type": content_type,
+            "received_bytes": 0,
+            "total_size": total_size,
+            "created_at": time.time(),
+        }
+        return {"upload_id": upload_id, "file_id": obj.id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Init failed: {e}")
+
+
+@router.post("/multipart/part")
+async def multipart_part(
+    upload_id: str = Query(...),
+    part_number: int = Query(..., ge=1),
+    total_parts: int | None = Query(None, ge=1),
+    body: bytes = Body(...),
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    """Append a chunk to the temporary file for this upload session.
+    Order is preserved by the client; server appends in the order received.
+    """
+    sess = _multipart_sessions.get(upload_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Upload session not found")
+    try:
+        # Append bytes to tmp file
+        with open(sess["tmp_path"], "ab") as f:
+            f.write(body)
+        sess["received_bytes"] = int(sess.get("received_bytes", 0)) + len(body)
+        return {
+            "upload_id": upload_id,
+            "part_number": part_number,
+            "received_bytes": sess["received_bytes"],
+            "total_parts": total_parts,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Append failed: {e}")
+
+
+@router.post("/multipart/complete")
+async def multipart_complete(
+    request_data: dict = Body(...),
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    """Finalize the upload: upload to Supabase storage, mark as processing, and start background processing."""
+    upload_id = request_data.get("upload_id")
+    if not upload_id:
+        raise HTTPException(status_code=422, detail="upload_id is required")
+    
+    # Cleanup old sessions first
+    cleanup_old_sessions()
+    
+    sess = _multipart_sessions.get(upload_id)
+    if not sess:
+        # Try to find the file by upload_id pattern or provide better error
+        raise HTTPException(status_code=404, detail=f"Upload session not found. Session may have expired. Please try uploading again.")
+    
+    try:
+        file_id = sess["file_id"]
+        tmp_path = sess["tmp_path"]
+        filename = sess["filename"]
+        content_type = sess["content_type"]
+        obj = db.get(FileModel, file_id)
+        if not obj:
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        # Read content from temp file
+        try:
+            import os
+            with open(tmp_path, "rb") as f:
+                content = f.read()
+            size_bytes = len(content)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Read temp failed: {e}")
+
+        path = f"files/{obj.id}/{filename}"
+        
+        # Upload to Supabase Storage (same as original upload)
+        if settings.SUPABASE_STORAGE_BUCKET and settings.SUPABASE_URL and settings.SUPABASE_SERVICE_ROLE_KEY:
+            try:
+                client = get_supabase()
+                res = client.storage.from_(settings.SUPABASE_STORAGE_BUCKET).upload(
+                    path=path,
+                    file=content,
+                    file_options={"contentType": content_type, "upsert": "true"},
+                )
+                err = getattr(res, "error", None)
+                if err:
+                    raise RuntimeError(err)
+                log = logging.getLogger("upload")
+                log.info("Stored to Supabase bucket=%s path=%s size=%s", settings.SUPABASE_STORAGE_BUCKET, path, size_bytes)
+                obj.storage_path = path
+                obj.size_bytes = size_bytes
+                obj.status = "processing"
+                db.add(obj)
+                db.commit()
+                db.refresh(obj)
+                # Start processing in a separate thread (downloads from Supabase)
+                try:
+                    import threading
+                    threading.Thread(target=process_file, args=(obj.id,), daemon=True).start()
+                except Exception as thread_err:
+                    log.warning("Thread start failed in multipart complete: %s", thread_err)
+            except Exception as storage_error:
+                # Fallback: process directly with in-memory content
+                log = logging.getLogger("upload")
+                log.warning("Supabase upload failed in multipart, falling back to direct ingestion: %s", storage_error)
+                obj.storage_path = None
+                obj.size_bytes = size_bytes
+                obj.status = "processing"
+                db.add(obj)
+                db.commit()
+                db.refresh(obj)
+                # Start processing with content directly
+                try:
+                    import threading
+                    threading.Thread(target=process_file, args=(obj.id, content, filename), daemon=True).start()
+                except Exception as thread_err:
+                    log.warning("Thread start failed in multipart complete fallback: %s", thread_err)
+        else:
+            # No Supabase config, process directly
+            obj.storage_path = None
+            obj.size_bytes = size_bytes
+            obj.status = "processing"
+            db.add(obj)
+            db.commit()
+            db.refresh(obj)
+            # Start processing with content directly
+            try:
+                import threading
+                threading.Thread(target=process_file, args=(obj.id, content, filename), daemon=True).start()
+            except Exception as thread_err:
+                log = logging.getLogger("upload")
+                log.warning("Thread start failed in multipart complete no-supabase: %s", thread_err)
+
+        # Cleanup temp file but keep session until processing starts successfully
+        try:
+            import os
+            os.remove(tmp_path)
+        except Exception:
+            pass
+        
+        # Clean up session after successful processing start
+        _multipart_sessions.pop(upload_id, None)
+        
+        return {"file_id": file_id, "status": "processing", "size_bytes": obj.size_bytes}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Complete failed: {e}")
 
 @router.post("/{file_id}/cancel")
 async def cancel_upload(file_id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
