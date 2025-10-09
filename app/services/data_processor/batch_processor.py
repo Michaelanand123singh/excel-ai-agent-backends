@@ -1,4 +1,4 @@
-from typing import Tuple, List, Dict
+from typing import Tuple, List, Dict, Callable, Optional
 from sqlalchemy import MetaData, text
 from sqlalchemy.orm import Session
 import asyncio
@@ -13,7 +13,7 @@ from app.services.data_processor.data_validator import validate_row
 from app.core.config import settings
 
 
-def process_in_batches(db: Session, file_bytes: bytes, filename: str, dataset_name: str, file_id: int = None, batch_size: int | None = None) -> Tuple[int, str]:
+def process_in_batches(db: Session, file_bytes: bytes, filename: str, dataset_name: str, file_id: int = None, batch_size: int | None = None, cancel_check: Optional[Callable[[], bool]] = None) -> Tuple[int, str]:
 	# SQLAlchemy 2.x: MetaData no longer accepts 'bind'. Use engine explicitly on create_all
 	metadata = MetaData()
 	engine = db.get_bind()
@@ -69,7 +69,14 @@ def process_in_batches(db: Session, file_bytes: bytes, filename: str, dataset_na
 			right_ids = _safe_insert(rows[mid:])
 			return left_ids + right_ids
 
-	for batch in iter_rows(file_bytes, filename, chunk_size=batch_size, skip_rows=already):
+    for batch in iter_rows(file_bytes, filename, chunk_size=batch_size, skip_rows=already):
+        # Cooperative cancellation: allow caller to abort cleanly
+        if cancel_check and cancel_check():
+            try:
+                log.info("Cancellation requested, stopping ingestion early")
+            except Exception:
+                pass
+            break
 		# Clean and validate batch
 		cleaned: List[Dict] = [clean_row(r) for r in batch]
 		valid: List[Dict] = [r for r in cleaned if validate_row(r)]
@@ -108,7 +115,7 @@ def process_in_batches(db: Session, file_bytes: bytes, filename: str, dataset_na
 		except Exception:
 			pass
 
-		# Send batch progress
+        # Send batch progress
 		if file_id:
 			# Websocket disabled to avoid pickling issues
 			pass
@@ -157,5 +164,3 @@ def process_in_batches(db: Session, file_bytes: bytes, filename: str, dataset_na
 		table = build_table(metadata, table_name, [])
 		metadata.create_all(bind=engine)
 	return total, table_name
-
-

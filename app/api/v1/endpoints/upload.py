@@ -11,6 +11,7 @@ from app.models.schemas.file import FileRead
 from app.services.supabase_client import get_supabase
 from app.core.config import settings
 from app.workers.file_processor import run as process_file
+from app.models.database.file import File as FileModel
 
 
 router = APIRouter()
@@ -18,6 +19,26 @@ router = APIRouter()
 
 def _process_file_background(file_id: int) -> None:
     # Legacy placeholder kept for compatibility
+    return None
+
+
+@router.post("/{file_id}/cancel")
+async def cancel_upload(file_id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    """Mark an in-flight upload/ingestion as cancelled. The worker cooperatively stops soon after."""
+    try:
+        obj = db.get(FileModel, file_id)
+        if not obj:
+            raise HTTPException(status_code=404, detail="File not found")
+        if obj.status in ("processed", "failed", "cancelled"):
+            return {"status": obj.status, "message": "Nothing to cancel"}
+        obj.status = "cancelled"
+        db.add(obj)
+        db.commit()
+        return {"status": "cancelled", "file_id": file_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Cancel failed: {e}")
     return None
 
 

@@ -53,10 +53,20 @@ async def search_part_number_bulk_elasticsearch(
         # Perform Elasticsearch bulk search
         start_time = time.perf_counter()
         
+        # Determine per-part limit based on request
+        if show_all:
+            per_part_limit = 100000
+        else:
+            # Use requested page_size when provided, fallback to 50
+            try:
+                per_part_limit = max(1, int(page_size))
+            except Exception:
+                per_part_limit = 500000
+
         result = es_client.bulk_search(
             part_numbers=part_numbers,
             file_id=file_id,
-            limit_per_part=10  # Increased to match single search behavior
+            limit_per_part=per_part_limit
         )
         
         total_time = (time.perf_counter() - start_time) * 1000
