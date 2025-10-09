@@ -89,33 +89,33 @@ def run(file_id: int, content: bytes | None = None, filename: str | None = None)
 				asyncio.run(websocket_manager.send_progress(str(file_id), message))
 		except Exception:
 			pass
-		
-        # Define a lightweight cancellation checker: treat non-processing status as cancellation
-        def is_cancelled() -> bool:
-            try:
-                fresh = session.get(FileModel, file_id)
-                return not fresh or fresh.status not in ("processing", "uploaded")
-            except Exception:
-                return False
 
-        total, table_name = process_in_batches(
-            session,
-            data,
-            name,
-            dataset_name=str(obj.id),
-            file_id=file_id,
-            cancel_check=is_cancelled,
-        )
-        obj.rows_count = total
-        # If cancelled mid-way, mark as cancelled instead of processed
-        try:
-            fresh = session.get(FileModel, file_id)
-            if fresh and fresh.status not in ("processing", "uploaded"):
-                obj.status = "cancelled"
-            else:
-                obj.status = "processed"
-        except Exception:
-            obj.status = "processed"
+		# Define a lightweight cancellation checker: treat non-processing status as cancellation
+		def is_cancelled() -> bool:
+			try:
+				fresh = session.get(FileModel, file_id)
+				return (fresh is None) or (fresh.status not in ("processing", "uploaded"))
+			except Exception:
+				return False
+
+		total, table_name = process_in_batches(
+			session,
+			data,
+			name,
+			dataset_name=str(obj.id),
+			file_id=file_id,
+			cancel_check=is_cancelled,
+		)
+		obj.rows_count = total
+		# If cancelled mid-way, mark as cancelled instead of processed
+		try:
+			fresh = session.get(FileModel, file_id)
+			if fresh and fresh.status not in ("processing", "uploaded"):
+				obj.status = "cancelled"
+			else:
+				obj.status = "processed"
+		except Exception:
+			obj.status = "processed"
 		session.add(obj)
 		session.commit()
 		

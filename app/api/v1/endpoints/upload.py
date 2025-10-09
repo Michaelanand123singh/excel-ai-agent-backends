@@ -42,6 +42,63 @@ async def cancel_upload(file_id: int, db: Session = Depends(get_db), user=Depend
     return None
 
 
+@router.get("/{file_id}/rows")
+async def get_file_rows(
+    file_id: int,
+    page: int = 1,
+    page_size: int = 100,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user)
+):
+    """Return paginated raw rows from the dataset table ds_{file_id}."""
+    try:
+        if page < 1:
+            page = 1
+        if page_size < 1:
+            page_size = 100
+        # Cap page_size to avoid huge payloads
+        page_size = min(page_size, 5000)
+
+        table_name = f"ds_{file_id}"
+        # Verify table exists
+        exists = db.execute(text(f"""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_name = '{table_name}'
+            );
+        """)).scalar()
+        if not exists:
+            raise HTTPException(status_code=404, detail=f"Dataset {file_id} not found")
+
+        # Get total count
+        total = int(db.execute(text(f"SELECT COUNT(*) FROM {table_name}")).scalar() or 0)
+        offset = (page - 1) * page_size
+
+        # Fetch a page of rows
+        rows = db.execute(text(f"SELECT * FROM {table_name} ORDER BY id ASC LIMIT :lim OFFSET :off"), {
+            "lim": page_size,
+            "off": offset,
+        }).mappings().all()
+
+        # Infer columns from first row if present
+        columns = list(rows[0].keys()) if rows else []
+
+        return {
+            "file_id": file_id,
+            "table": table_name,
+            "page": page,
+            "page_size": page_size,
+            "total_rows": total,
+            "total_pages": (total + page_size - 1) // page_size if page_size else 1,
+            "columns": columns,
+            "rows": [dict(r) for r in rows],
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch rows: {e}")
+
+
 @router.post("/", response_model=FileRead)
 @router.post("", response_model=FileRead)
 async def upload_file(background: BackgroundTasks, file: UploadFile = File(...), db: Session = Depends(get_db)):

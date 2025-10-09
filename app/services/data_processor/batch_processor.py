@@ -69,14 +69,14 @@ def process_in_batches(db: Session, file_bytes: bytes, filename: str, dataset_na
 			right_ids = _safe_insert(rows[mid:])
 			return left_ids + right_ids
 
-    for batch in iter_rows(file_bytes, filename, chunk_size=batch_size, skip_rows=already):
-        # Cooperative cancellation: allow caller to abort cleanly
-        if cancel_check and cancel_check():
-            try:
-                log.info("Cancellation requested, stopping ingestion early")
-            except Exception:
-                pass
-            break
+	for batch in iter_rows(file_bytes, filename, chunk_size=batch_size, skip_rows=already):
+		# Cooperative cancellation: allow caller to abort cleanly
+		if cancel_check and cancel_check():
+			try:
+				log.info("Cancellation requested, stopping ingestion early")
+			except Exception:
+				pass
+			break
 		# Clean and validate batch
 		cleaned: List[Dict] = [clean_row(r) for r in batch]
 		valid: List[Dict] = [r for r in cleaned if validate_row(r)]
@@ -115,7 +115,7 @@ def process_in_batches(db: Session, file_bytes: bytes, filename: str, dataset_na
 		except Exception:
 			pass
 
-        # Send batch progress
+		# Send batch progress
 		if file_id:
 			# Websocket disabled to avoid pickling issues
 			pass
