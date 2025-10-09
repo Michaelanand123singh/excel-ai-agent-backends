@@ -96,8 +96,7 @@ async def bulk_excel_search(
         from app.services.search_engine.unified_search_engine import UnifiedSearchEngine
         
         search_engine = UnifiedSearchEngine(db, table_name, file_id=file_id)
-        # Force PostgreSQL for Excel bulk search to ensure consistent results
-        search_engine.es_available = False
+        # Use Elasticsearch as primary via UnifiedSearchEngine (GCS disabled, ES preferred)
         unified_result = search_engine.search_bulk_parts(
             part_numbers=parsed_parts,
             search_mode=search_mode,

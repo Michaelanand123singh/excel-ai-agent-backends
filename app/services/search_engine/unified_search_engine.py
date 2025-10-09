@@ -35,16 +35,16 @@ class UnifiedSearchEngine:
         self.file_id = file_id
         self.cache = {}  # Simple in-memory cache for repeated searches
         
-        # Initialize Google Cloud Search client (primary) with error handling
+        # Initialize Google Cloud Search client (disabled; ES is primary)
         try:
-            self.gcs_client = GoogleCloudSearchClient()
-            self.gcs_available = self.gcs_client.is_available()
+            # Explicitly disable GCS usage while keeping import intact
+            self.gcs_client = None
+            self.gcs_available = False
         except Exception as e:
-            logger.warning(f"⚠️ Failed to initialize Google Cloud Search client: {e}")
             self.gcs_client = None
             self.gcs_available = False
         
-        # Initialize Elasticsearch client (fallback) with error handling
+        # Initialize Elasticsearch client (primary)
         try:
             self.es_client = ElasticsearchBulkSearch()
             self.es_available = self.es_client.is_available()
@@ -53,9 +53,7 @@ class UnifiedSearchEngine:
             self.es_client = None
             self.es_available = False
         
-        if self.gcs_available:
-            logger.info(f"✅ Google Cloud Search available for {table_name}")
-        elif self.es_available:
+        if self.es_available:
             logger.info(f"✅ Elasticsearch available for {table_name}")
         else:
             logger.warning(f"⚠️ Neither GCS nor ES available, using PostgreSQL fallback for {table_name}")
@@ -74,43 +72,51 @@ class UnifiedSearchEngine:
         
         part_number = part_number.strip()
         
-        # Try Google Cloud Search first (primary)
-        if self.gcs_available and self.gcs_client and self.file_id:
-            try:
-                logger.info(f"🔍 Using Google Cloud Search for single search: {part_number}")
-                result = self.gcs_client.search_single_part(
-                    part_number=part_number,
-                    file_id=self.file_id,
-                    search_mode=search_mode,
-                    page=page,
-                    page_size=page_size,
-                    show_all=show_all
-                )
-                if result and result.get('total_matches', 0) > 0:
-                    result['search_engine'] = 'google_cloud_search'
-                    result['latency_ms'] = int((time.perf_counter() - start_time) * 1000)
-                    return result
-                else:
-                    logger.warning(f"⚠️ Google Cloud Search returned 0 results, falling back to Elasticsearch")
-            except Exception as e:
-                logger.warning(f"⚠️ Google Cloud Search failed, falling back to Elasticsearch: {e}")
-        
-        # Try Elasticsearch as fallback
-        if self.es_available and self.es_client and self.file_id:
+        # Use Elasticsearch as primary
+        if self.es_client and self.file_id:
             try:
                 logger.info(f"🔍 Using Elasticsearch for single search: {part_number}")
-                result = self._search_with_elasticsearch([part_number], search_mode, page, page_size, show_all)
-                if result and result.get('results', {}).get(part_number):
-                    es_result = result['results'][part_number]
-                    # Check if Elasticsearch returned meaningful results
-                    if es_result.get('total_matches', 0) > 0:
-                        es_result['search_engine'] = 'elasticsearch'
-                        es_result['latency_ms'] = int((time.perf_counter() - start_time) * 1000)
-                        return es_result
-                    else:
-                        logger.warning(f"⚠️ Elasticsearch returned 0 results, falling back to PostgreSQL")
+                # Call ES directly for single search to avoid extra aggregation overhead
+                per_part_limit = page_size if not show_all else 10000
+                raw = self.es_client.bulk_search([part_number], self.file_id, limit_per_part=per_part_limit)
+                es_part = (raw or {}).get('results', {}).get(part_number)
+                if es_part:
+                    companies = es_part.get('companies', [])
+                    # Apply pagination on top of ES results if needed
+                    if not show_all and len(companies) > page_size:
+                        start_idx = (page - 1) * page_size
+                        end_idx = start_idx + page_size
+                        companies = companies[start_idx:end_idx]
+
+                    prices = [c.get('unit_price', 0) for c in companies if c.get('unit_price', 0) > 0]
+                    quantities = [c.get('quantity', 0) for c in companies if c.get('quantity', 0) > 0]
+                    min_price = min(prices) if prices else 0.0
+                    max_price = max(prices) if prices else 0.0
+                    total_quantity = sum(quantities)
+
+                    return {
+                        'part_number': part_number,
+                        'total_matches': len(companies),
+                        'companies': companies,
+                        'price_summary': {
+                            'min_price': min_price,
+                            'max_price': max_price,
+                            'total_quantity': total_quantity,
+                        },
+                        'page': page,
+                        'page_size': page_size,
+                        'total_pages': 1 if show_all else int((len(companies) + page_size - 1) // page_size),
+                        'message': f"Found {len(companies)} companies with part number '{part_number}'. Price range: ₹{min_price:.2f} - ₹{max_price:.2f}",
+                        'cached': False,
+                        'latency_ms': int((time.perf_counter() - start_time) * 1000),
+                        'table_name': self.table_name,
+                        'show_all': show_all,
+                        'search_mode': search_mode,
+                        'match_type': 'elasticsearch_comprehensive',
+                        'search_engine': 'elasticsearch',
+                    }
                 else:
-                    logger.warning(f"⚠️ Elasticsearch returned no results, falling back to PostgreSQL")
+                    logger.warning("⚠️ Elasticsearch returned no results, falling back to PostgreSQL")
             except Exception as e:
                 logger.warning(f"⚠️ Elasticsearch search failed, falling back to PostgreSQL: {e}")
         
@@ -199,33 +205,8 @@ class UnifiedSearchEngine:
         """
         start_time = time.perf_counter()
         
-        # Try Google Cloud Search first (primary) - optimized for massive bulk searches
-        if self.gcs_available and self.gcs_client and self.file_id:
-            try:
-                logger.info(f"🚀 Using Google Cloud Search for bulk search: {len(part_numbers)} parts (optimized for 50 lakh+ parts)")
-                
-                # For very large bulk searches (50 lakh+ parts), use chunked processing
-                if len(part_numbers) > 10000:
-                    logger.info(f"📦 Large bulk search detected ({len(part_numbers)} parts), using chunked processing")
-                    return self._search_with_gcs_chunked(part_numbers, start_time)
-                else:
-                    # For smaller bulk searches, use direct bulk search
-                    result = self.gcs_client.bulk_search(
-                        part_numbers=part_numbers,
-                        file_id=self.file_id,
-                        limit_per_part=10000000  # Show ALL results from dataset (up to 1 crore)
-                    )
-                    if result and result.get('total_matches', 0) > 0:
-                        result['search_engine'] = 'google_cloud_search'
-                        result['latency_ms'] = int((time.perf_counter() - start_time) * 1000)
-                        return result
-                    else:
-                        logger.warning(f"⚠️ Google Cloud Search returned 0 results for all parts, falling back to Elasticsearch")
-            except Exception as e:
-                logger.warning(f"⚠️ Google Cloud Search bulk search failed, falling back to Elasticsearch: {e}")
-        
-        # Try Elasticsearch as fallback
-        if self.es_available and self.es_client and self.file_id:
+        # Use Elasticsearch as primary for bulk
+        if self.es_client and self.file_id:
             try:
                 logger.info(f"🔍 Using Elasticsearch for bulk search: {len(part_numbers)} parts")
                 
@@ -536,8 +517,8 @@ class UnifiedSearchEngine:
         """
         try:
             # Use Elasticsearch bulk search with chunking to avoid oversized msearch bodies
-            # For bulk search, show ALL results from dataset for each part
-            limit_per_part = 10000000  # Show ALL results from dataset (up to 1 crore for massive datasets)
+            # Respect practical ES server limits; do not request unbounded sizes
+            limit_per_part = page_size if not show_all else 10000
 
             # Optimized chunk size for ultra-fast ES searches
             # 50 parts per chunk = faster processing, better timeout handling
