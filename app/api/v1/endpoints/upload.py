@@ -477,6 +477,30 @@ async def delete_file(file_id: int, db: Session = Depends(get_db), user=Depends(
             except Exception as e:
                 log.warning(f"Failed to delete from Supabase storage: {e}")
         
+        # Delete from Elasticsearch if data was synced
+        if file_obj.elasticsearch_synced:
+            try:
+                from app.services.search_engine.elasticsearch_client import ElasticsearchBulkSearch
+                es_client = ElasticsearchBulkSearch()
+                if es_client.is_available():
+                    # Delete all documents with this file_id
+                    delete_query = {
+                        "query": {
+                            "term": {"file_id": file_id}
+                        }
+                    }
+                    result = es_client.es.delete_by_query(
+                        index=es_client.index_name,
+                        body=delete_query,
+                        refresh=True
+                    )
+                    deleted_count = result.get('deleted', 0)
+                    log.info(f"Deleted {deleted_count} documents from Elasticsearch for file {file_id}")
+                else:
+                    log.warning("Elasticsearch not available, skipping ES cleanup")
+            except Exception as e:
+                log.warning(f"Failed to delete from Elasticsearch: {e}")
+        
         # Delete the file record
         db.delete(file_obj)
         db.commit()
