@@ -323,6 +323,194 @@ class ElasticsearchBulkSearch:
             logger.error(f"❌ Failed to delete Elasticsearch index: {e}")
             return False
     
+    def search_bulk_parts_all_files(self, part_numbers: List[str], search_mode: str = "hybrid", page: int = 1, page_size: int = 100) -> Dict[str, Any]:
+        """
+        Search part numbers across ALL files in Elasticsearch (no file_id filter)
+        """
+        if not self.is_available():
+            raise Exception("Elasticsearch not available")
+        
+        start_time = time.perf_counter()
+        
+        try:
+            # Prepare multi-search body
+            msearch_body = []
+            limit_per_part = min(page_size, 1000)  # Reasonable limit per part
+            
+            for part in part_numbers:
+                # Build search query for all files (no file_id filter)
+                if search_mode == "exact":
+                    search_query = {
+                        "index": self.index_name,
+                        "body": {
+                            "query": {
+                                "bool": {
+                                    "must": [
+                                        {
+                                            "term": {
+                                                "part_number.keyword": part
+                                            }
+                                        }
+                                    ]
+                                }
+                            },
+                            "track_total_hits": False,
+                            "_source": {
+                                "includes": [
+                                    "file_id",
+                                    "company_name",
+                                    "contact_details", 
+                                    "email",
+                                    "quantity",
+                                    "unit_price",
+                                    "item_description",
+                                    "part_number",
+                                    "uqc",
+                                    "secondary_buyer",
+                                    "secondary_buyer_contact",
+                                    "secondary_buyer_email"
+                                ]
+                            },
+                            "size": limit_per_part,
+                            "sort": [
+                                {"_score": {"order": "desc"}},
+                                {"unit_price": {"order": "asc"}}
+                            ]
+                        }
+                    }
+                else:  # hybrid or fuzzy
+                    search_query = {
+                        "index": self.index_name,
+                        "body": {
+                            "query": {
+                                "bool": {
+                                    "should": [
+                                        {
+                                            "term": {
+                                                "part_number.keyword": {
+                                                    "value": part,
+                                                    "boost": 3.0
+                                                }
+                                            }
+                                        },
+                                        {
+                                            "match": {
+                                                "part_number": {
+                                                    "query": part,
+                                                    "boost": 2.0,
+                                                    "fuzziness": 1 if search_mode == "fuzzy" else 0,
+                                                    "operator": "and"
+                                                }
+                                            }
+                                        }
+                                    ],
+                                    "minimum_should_match": 1
+                                }
+                            },
+                            "track_total_hits": False,
+                            "_source": {
+                                "includes": [
+                                    "file_id",
+                                    "company_name",
+                                    "contact_details", 
+                                    "email",
+                                    "quantity",
+                                    "unit_price",
+                                    "item_description",
+                                    "part_number",
+                                    "uqc",
+                                    "secondary_buyer",
+                                    "secondary_buyer_contact",
+                                    "secondary_buyer_email"
+                                ]
+                            },
+                            "size": limit_per_part,
+                            "sort": [
+                                {"_score": {"order": "desc"}},
+                                {"unit_price": {"order": "asc"}}
+                            ]
+                        }
+                    }
+                
+                msearch_body.append(search_query)
+            
+            # Execute multi-search
+            response = self.es.msearch(body=msearch_body)
+            
+            # Process results
+            results = {}
+            total_matches = 0
+            
+            for i, part in enumerate(part_numbers):
+                part_results = response['responses'][i]
+                
+                if 'hits' in part_results:
+                    hits = part_results['hits']['hits']
+                    companies = []
+                    
+                    for hit in hits:
+                        source = hit['_source']
+                        score = hit.get('_score', 0)
+                        file_id = source.get('file_id', 'unknown')
+                        
+                        # Fast confidence estimation based on ES score
+                        confidence = min(100, max(0, (score / 10) * 100))
+                        
+                        # Simple match type based on score
+                        if score > 8:
+                            match_type = "exact"
+                        elif score > 4:
+                            match_type = "prefix"
+                        else:
+                            match_type = "fuzzy"
+                        
+                        company_data = {
+                            "file_id": file_id,
+                            "company_name": source.get("company_name", "N/A"),
+                            "contact_details": source.get("contact_details", "N/A"),
+                            "email": source.get("email", "N/A"),
+                            "quantity": source.get("quantity", 0),
+                            "unit_price": source.get("unit_price", 0.0),
+                            "item_description": source.get("item_description", "N/A"),
+                            "part_number": source.get("part_number", "N/A"),
+                            "uqc": source.get("uqc", "N/A"),
+                            "secondary_buyer": source.get("secondary_buyer", "N/A"),
+                            "secondary_buyer_contact": source.get("secondary_buyer_contact", "N/A"),
+                            "secondary_buyer_email": source.get("secondary_buyer_email", "N/A"),
+                            "confidence": confidence,
+                            "match_type": match_type,
+                            "match_status": "found",
+                            "confidence_breakdown": {
+                                "part_number": {"score": confidence, "method": "elasticsearch_score", "details": f"ES score: {score}"},
+                                "description": {"score": 0, "method": "not_calculated", "details": "Skipped for speed"},
+                                "manufacturer": {"score": 0, "method": "not_calculated", "details": "Skipped for speed"},
+                                "length_penalty": 0
+                            }
+                        }
+                        companies.append(company_data)
+                    
+                    if companies:
+                        results[part] = {
+                            "companies": companies,
+                            "total_matches": len(companies),
+                            "match_type": "elasticsearch_all_files"
+                        }
+                        total_matches += len(companies)
+            
+            query_time = (time.perf_counter() - start_time) * 1000
+            
+            return {
+                "results": results,
+                "total_parts": len(part_numbers),
+                "total_matches": total_matches,
+                "latency_ms": query_time,
+                "search_engine": "elasticsearch_all_files"
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Elasticsearch all-files search failed: {e}")
+            raise Exception(f"Elasticsearch all-files search failed: {e}")
+
     def get_index_stats(self) -> Dict[str, Any]:
         """Get Elasticsearch index statistics"""
         if not self.is_available():

@@ -9,6 +9,7 @@ from app.api.v1.endpoints.websocket import router as websocket_router
 from app.api.v1.endpoints.bulk_search import router as bulk_search_router
 from app.api.v1.endpoints.query_optimized import router as query_optimized_router
 from app.api.v1.endpoints.query_elasticsearch import router as query_elasticsearch_router
+from app.api.v1.endpoints.query_all_files import router as query_all_files_router
 from app.api.v1.endpoints.sync import router as sync_router
 
 
@@ -19,6 +20,7 @@ api_router_v1.include_router(upload_router, prefix="/upload", tags=["upload"])
 api_router_v1.include_router(query_router, prefix="/query", tags=["query"])
 api_router_v1.include_router(query_optimized_router, prefix="/query-optimized", tags=["query-optimized"])
 api_router_v1.include_router(query_elasticsearch_router, prefix="/query-elasticsearch", tags=["query-elasticsearch"])
+api_router_v1.include_router(query_all_files_router, prefix="/query-all-files", tags=["query-all-files"])
 api_router_v1.include_router(analytics_router, prefix="/analytics", tags=["analytics"])
 api_router_v1.include_router(bulk_search_router, prefix="/bulk-search", tags=["bulk-search"])
 api_router_v1.include_router(sync_router, prefix="/sync", tags=["sync"])
