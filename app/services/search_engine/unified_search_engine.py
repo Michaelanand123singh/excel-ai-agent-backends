@@ -6,6 +6,8 @@ Ensures single search and bulk search return identical results
 
 import time
 import logging
+import json
+import hashlib
 from typing import Dict, Any, List, Optional, Tuple
 from sqlalchemy.orm import Session
 from sqlalchemy import text
@@ -20,6 +22,7 @@ from app.utils.helpers.part_number import (
 from app.services.query_engine.confidence_calculator import confidence_calculator
 from app.services.search_engine.elasticsearch_client import ElasticsearchBulkSearch
 from app.services.search_engine.google_cloud_search_client import GoogleCloudSearchClient
+from app.services.cache.ultra_fast_cache_manager import ultra_fast_cache
 
 logger = logging.getLogger(__name__)
 
@@ -201,9 +204,26 @@ class UnifiedSearchEngine:
                          page: int = 1, page_size: int = 100, show_all: bool = False) -> Dict[str, Any]:
         """
         Search for multiple part numbers using Elasticsearch as primary with PostgreSQL fallback
-        Ensures consistent results between single and bulk search
+        Ensures consistent results between single and bulk search with Redis caching
         """
         start_time = time.perf_counter()
+        
+        # Check Redis cache first
+        logger.info(f"🔍 Checking cache for unified bulk search: {len(part_numbers)} parts")
+        cached_result = ultra_fast_cache.get_cached_bulk_search_result(
+            file_id=self.file_id,
+            part_numbers=part_numbers,
+            search_mode=search_mode
+        )
+        
+        if cached_result:
+            logger.info(f"✅ Cache HIT! Returning cached results for {len(part_numbers)} parts")
+            cached_result["cached"] = True
+            cached_result["cache_hit"] = True
+            cached_result["search_engine"] = "unified_cached"
+            return cached_result
+        
+        logger.info(f"❌ Cache MISS! Performing unified search for {len(part_numbers)} parts")
         
         # Use Elasticsearch as primary for bulk
         if self.es_client and self.file_id:
@@ -246,6 +266,23 @@ class UnifiedSearchEngine:
                     if has_results:
                         result['search_engine'] = 'elasticsearch'
                         result['latency_ms'] = int((time.perf_counter() - start_time) * 1000)
+                        result['cached'] = False
+                        result['cache_hit'] = False
+                        
+                        # Cache the Elasticsearch result for 30 minutes
+                        logger.info(f"💾 Caching Elasticsearch search results for {len(part_numbers)} parts")
+                        cache_success = ultra_fast_cache.cache_bulk_search_result(
+                            file_id=self.file_id,
+                            part_numbers=part_numbers,
+                            search_mode=search_mode,
+                            result=result
+                        )
+                        
+                        if cache_success:
+                            logger.info(f"✅ Successfully cached Elasticsearch search results")
+                        else:
+                            logger.warning(f"⚠️ Failed to cache Elasticsearch search results")
+                        
                         return result
                     else:
                         logger.warning(f"⚠️ Elasticsearch returned 0 results for all parts, falling back to PostgreSQL")
@@ -279,12 +316,30 @@ class UnifiedSearchEngine:
                         "error": str(e)
                     }
         
-        return {
+        final_result = {
             "results": results,
             "total_parts": len(part_numbers),
             "latency_ms": int((time.perf_counter() - start_time) * 1000),
-            "search_engine": "postgresql_fallback"
+            "search_engine": "postgresql_fallback",
+            "cached": False,
+            "cache_hit": False
         }
+        
+        # Cache the result for 30 minutes
+        logger.info(f"💾 Caching unified search results for {len(part_numbers)} parts")
+        cache_success = ultra_fast_cache.cache_bulk_search_result(
+            file_id=self.file_id,
+            part_numbers=part_numbers,
+            search_mode=search_mode,
+            result=final_result
+        )
+        
+        if cache_success:
+            logger.info(f"✅ Successfully cached unified search results")
+        else:
+            logger.warning(f"⚠️ Failed to cache unified search results")
+        
+        return final_result
     
     def _search_with_gcs_chunked(self, part_numbers: List[str], start_time: float) -> Dict[str, Any]:
         """

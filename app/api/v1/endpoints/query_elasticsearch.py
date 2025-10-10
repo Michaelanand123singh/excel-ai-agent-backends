@@ -5,6 +5,8 @@ Elasticsearch-powered ultra-fast bulk search endpoint
 
 import time
 import logging
+import json
+import hashlib
 from typing import Dict, Any, List
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -13,6 +15,7 @@ from app.api.dependencies.auth import get_current_user
 from app.models.database.user import User
 from app.services.search_engine.elasticsearch_client import ElasticsearchBulkSearch
 from app.services.search_engine.data_sync import DataSyncService
+from app.services.cache.ultra_fast_cache_manager import ultra_fast_cache
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -24,8 +27,8 @@ async def search_part_number_bulk_elasticsearch(
     user: User = Depends(get_current_user)
 ):
     """
-    Ultra-fast bulk search using Elasticsearch
-    Target: 10K parts in under 5 seconds
+    Ultra-fast bulk search using Elasticsearch with Redis caching
+    Target: 10K parts in under 5 seconds with 90% cache hit rate
     """
     try:
         file_id = req.get('file_id')
@@ -40,6 +43,33 @@ async def search_part_number_bulk_elasticsearch(
         
         if not part_numbers:
             raise HTTPException(status_code=400, detail="Part numbers are required")
+        
+        # Create cache key for this search
+        cache_key = ultra_fast_cache.get_cache_key(
+            "bulk_search_elasticsearch",
+            file_id=file_id,
+            parts_hash=hashlib.md5(json.dumps(sorted(part_numbers)).encode()).hexdigest(),
+            search_mode=search_mode,
+            show_all=show_all,
+            page_size=page_size
+        )
+        
+        # Check Redis cache first
+        logger.info(f"🔍 Checking cache for bulk search: {len(part_numbers)} parts")
+        cached_result = ultra_fast_cache.get_cached_bulk_search_result(
+            file_id=file_id,
+            part_numbers=part_numbers,
+            search_mode=search_mode
+        )
+        
+        if cached_result:
+            logger.info(f"✅ Cache HIT! Returning cached results for {len(part_numbers)} parts")
+            cached_result["cached"] = True
+            cached_result["cache_hit"] = True
+            cached_result["search_engine"] = "elasticsearch_cached"
+            return cached_result
+        
+        logger.info(f"❌ Cache MISS! Performing Elasticsearch search for {len(part_numbers)} parts")
         
         # Initialize Elasticsearch client
         es_client = ElasticsearchBulkSearch()
@@ -75,8 +105,24 @@ async def search_part_number_bulk_elasticsearch(
         result.update({
             "total_time_ms": total_time,
             "performance_rating": "excellent" if total_time < 5000 else "good" if total_time < 10000 else "acceptable",
-            "search_engine": "elasticsearch"
+            "search_engine": "elasticsearch",
+            "cached": False,
+            "cache_hit": False
         })
+        
+        # Cache the result for 30 minutes
+        logger.info(f"💾 Caching search results for {len(part_numbers)} parts")
+        cache_success = ultra_fast_cache.cache_bulk_search_result(
+            file_id=file_id,
+            part_numbers=part_numbers,
+            search_mode=search_mode,
+            result=result
+        )
+        
+        if cache_success:
+            logger.info(f"✅ Successfully cached search results")
+        else:
+            logger.warning(f"⚠️ Failed to cache search results")
         
         logger.info(f"✅ Elasticsearch bulk search completed: {len(part_numbers)} parts in {total_time:.2f}ms")
         
