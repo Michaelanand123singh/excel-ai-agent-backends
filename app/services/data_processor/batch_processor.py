@@ -7,7 +7,8 @@ import logging
 from app.services.data_processor.excel_parser import iter_rows
 from app.services.data_processor.schema_generator import build_table
 from app.services.vector_store.vector_operations import upsert_texts
-# Removed websocket_manager import to avoid pickling issues
+# NOTE: Avoid importing websocket_manager at module load to keep workers lightweight.
+# We'll import inside functions right before sending to prevent pickling issues.
 from app.services.data_processor.data_cleaner import clean_row
 from app.services.data_processor.data_validator import validate_row
 from app.core.config import settings
@@ -117,8 +118,29 @@ def process_in_batches(db: Session, file_bytes: bytes, filename: str, dataset_na
 
 		# Send batch progress
 		if file_id:
-			# Websocket disabled to avoid pickling issues
-			pass
+			try:
+				# Lazy import to avoid pickling/init issues
+				from app.core.websocket_manager import websocket_manager
+				message = {
+					"type": "batch_progress",
+					"file_id": file_id,
+					"processed_rows": int(total),
+					"current_batch": int(batch_count),
+					"processing_stage": "processing_data"
+				}
+				# Best-effort non-blocking send
+				loop = None
+				try:
+					loop = asyncio.get_running_loop()
+				except RuntimeError:
+					loop = None
+				if loop and loop.is_running():
+					loop.create_task(websocket_manager.send_progress(str(file_id), message))
+				else:
+					asyncio.run(websocket_manager.send_progress(str(file_id), message))
+			except Exception:
+				# Never fail ingestion due to progress update issues
+				pass
 
 		# Build texts for embeddings from string-like columns
 		string_cols: List[str] = []
@@ -155,10 +177,27 @@ def process_in_batches(db: Session, file_bytes: bytes, filename: str, dataset_na
 				except Exception:
 					pass
 			
-			# Send embedding progress
+			# Send embedding progress (lightweight notification)
 			if file_id:
-				# Websocket disabled to avoid pickling issues
-				pass
+				try:
+					from app.core.websocket_manager import websocket_manager
+					msg = {
+						"type": "embedding_progress",
+						"file_id": file_id,
+						"current_batch": int(batch_count),
+						"processing_stage": "embedding_upsert"
+					}
+					loop = None
+					try:
+						loop = asyncio.get_running_loop()
+					except RuntimeError:
+						loop = None
+					if loop and loop.is_running():
+						loop.create_task(websocket_manager.send_progress(str(file_id), msg))
+					else:
+						asyncio.run(websocket_manager.send_progress(str(file_id), msg))
+				except Exception:
+					pass
 
 	if table is None:
 		table = build_table(metadata, table_name, [])

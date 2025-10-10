@@ -58,3 +58,28 @@ wheels/
 venv/
 env/
 ENV/
+
+# Database files
+*.sqlite
+*.sqlite3
+*.db
+
+# ChromaDB vector database
+.chroma/
+chroma/
+
+# Uploaded files and large data
+uploads/
+data/
+*.xlsx
+*.xls
+*.csv
+*.zip
+*.rar
+*.tar.gz
+*.tar
+*.bak
+
+# Test files (temporary)
+test_*.py
+check_*.py

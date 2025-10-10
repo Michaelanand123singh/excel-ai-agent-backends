@@ -93,7 +93,7 @@ def run(file_id: int, content: bytes | None = None, filename: str | None = None,
 				loop = asyncio.get_running_loop()
 			except RuntimeError:
 				loop = None
-			message = {"type": "download_complete", "file_id": file_id, "size_bytes": len(data)}
+			message = {"type": "download_complete", "file_id": file_id, "size_bytes": len(data), "processing_stage": "downloaded"}
 			if loop and loop.is_running():
 				loop.create_task(websocket_manager.send_progress(str(file_id), message))
 			else:
@@ -108,6 +108,21 @@ def run(file_id: int, content: bytes | None = None, filename: str | None = None,
 				return (fresh is None) or (fresh.status not in ("processing", "uploaded"))
 			except Exception:
 				return False
+
+		# Notify data processing start
+		try:
+			loop = None
+			try:
+				loop = asyncio.get_running_loop()
+			except RuntimeError:
+				loop = None
+			message = {"type": "data_processing_started", "file_id": file_id, "processing_stage": "parsing_data"}
+			if loop and loop.is_running():
+				loop.create_task(websocket_manager.send_progress(str(file_id), message))
+			else:
+				asyncio.run(websocket_manager.send_progress(str(file_id), message))
+		except Exception:
+			pass
 
 		total, table_name = process_in_batches(
 			session,
@@ -191,6 +206,21 @@ def run(file_id: int, content: bytes | None = None, filename: str | None = None,
 		except Exception as gcs_err:
 			logger.warning(f"Google Cloud Search indexing failed for file {file_id}: {gcs_err}")
 		
+		# Notify PostgreSQL storage complete
+		try:
+			loop = None
+			try:
+				loop = asyncio.get_running_loop()
+			except RuntimeError:
+				loop = None
+			message = {"type": "postgresql_storage_complete", "file_id": file_id, "total_rows": int(total), "processing_stage": "postgresql_ready"}
+			if loop and loop.is_running():
+				loop.create_task(websocket_manager.send_progress(str(file_id), message))
+			else:
+				asyncio.run(websocket_manager.send_progress(str(file_id), message))
+		except Exception:
+			pass
+
 		# Notify processing complete
 		logger.info(f"Processing complete for file {file_id}: {total} rows processed")
 		try:
@@ -198,6 +228,21 @@ def run(file_id: int, content: bytes | None = None, filename: str | None = None,
 			sync_service = DataSyncService()
 			es_synced = False
 			try:
+				# Notify Elasticsearch sync started
+				try:
+					loop = None
+					try:
+						loop = asyncio.get_running_loop()
+					except RuntimeError:
+						loop = None
+					msg = {"type": "elasticsearch_sync_started", "file_id": file_id, "processing_stage": "elasticsearch_syncing"}
+					if loop and loop.is_running():
+						loop.create_task(websocket_manager.send_progress(str(file_id), msg))
+					else:
+						asyncio.run(websocket_manager.send_progress(str(file_id), msg))
+				except Exception:
+					pass
+
 				es_synced = sync_service.sync_file_to_elasticsearch(file_id)
 			except Exception as sync_err:
 				logger.warning(f"Elasticsearch sync failed for file {file_id}: {sync_err}")
