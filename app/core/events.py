@@ -24,6 +24,35 @@ def register_startup_event(app: FastAPI) -> None:
                 conn.execute(text("SELECT 1"))
             # Auto-create tables if missing
             Base.metadata.create_all(bind=engine)
+            # Ensure new columns exist on legacy databases (idempotent)
+            try:
+                with engine.begin() as conn:
+                    # Add elasticsearch_synced (boolean) if missing
+                    conn.execute(text("""
+                        DO $$
+                        BEGIN
+                            IF NOT EXISTS (
+                                SELECT 1 FROM information_schema.columns
+                                WHERE table_name = 'file' AND column_name = 'elasticsearch_synced'
+                            ) THEN
+                                ALTER TABLE "file" ADD COLUMN elasticsearch_synced boolean DEFAULT false;
+                            END IF;
+                        END$$;
+                    """))
+                    # Add elasticsearch_sync_error (varchar) if missing
+                    conn.execute(text("""
+                        DO $$
+                        BEGIN
+                            IF NOT EXISTS (
+                                SELECT 1 FROM information_schema.columns
+                                WHERE table_name = 'file' AND column_name = 'elasticsearch_sync_error'
+                            ) THEN
+                                ALTER TABLE "file" ADD COLUMN elasticsearch_sync_error varchar(512);
+                            END IF;
+                        END$$;
+                    """))
+            except Exception as mig_err:
+                log.error("DB: failed ensuring ES sync columns: %s", mig_err)
             log.info("DB: connected")
         except Exception as e:
             log.error("DB: connection failed: %s", e)

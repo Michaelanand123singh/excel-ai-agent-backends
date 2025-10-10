@@ -244,8 +244,23 @@ def run(file_id: int, content: bytes | None = None, filename: str | None = None,
 					pass
 
 				es_synced = sync_service.sync_file_to_elasticsearch(file_id)
+				
+				# Update file record with ES sync status
+				obj.elasticsearch_synced = es_synced
+				if not es_synced:
+					obj.elasticsearch_sync_error = str(sync_err) if 'sync_err' in locals() else "Unknown error"
+				else:
+					obj.elasticsearch_sync_error = None
+				session.add(obj)
+				session.commit()
+				
 			except Exception as sync_err:
 				logger.warning(f"Elasticsearch sync failed for file {file_id}: {sync_err}")
+				# Update file record with ES sync error
+				obj.elasticsearch_synced = False
+				obj.elasticsearch_sync_error = str(sync_err)
+				session.add(obj)
+				session.commit()
 			
 			loop = None
 			try:

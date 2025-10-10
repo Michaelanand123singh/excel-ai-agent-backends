@@ -12,5 +12,7 @@ class File(Base):
     status: Mapped[str] = mapped_column(String(64), default="uploaded")
     storage_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     rows_count: Mapped[int] = mapped_column(Integer, default=0)
+    elasticsearch_synced: Mapped[bool] = mapped_column(default=False)
+    elasticsearch_sync_error: Mapped[str | None] = mapped_column(String(512), nullable=True)
 
 

@@ -12,6 +12,7 @@ from app.services.supabase_client import get_supabase
 from app.core.config import settings
 from app.workers.file_processor import run as process_file
 from app.models.database.file import File as FileModel
+from app.services.search_engine.data_sync_service import DataSyncService
 
 
 router = APIRouter()
@@ -545,5 +546,89 @@ async def list_stuck_files(db: Session = Depends(get_db), user=Depends(get_curre
     except Exception as e:
         log.error(f"Failed to list stuck files: {e}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to list stuck files: {e}")
+
+
+@router.get("/{file_id}/elasticsearch-status")
+async def get_elasticsearch_status(file_id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    """
+    Get Elasticsearch sync status for a file
+    """
+    log = logging.getLogger("upload")
+    try:
+        file_obj = db.query(FileModel).filter(FileModel.id == file_id).first()
+        if not file_obj:
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        return {
+            "file_id": file_id,
+            "filename": file_obj.filename,
+            "elasticsearch_synced": file_obj.elasticsearch_synced,
+            "elasticsearch_sync_error": file_obj.elasticsearch_sync_error,
+            "status": "synced" if file_obj.elasticsearch_synced else "failed" if file_obj.elasticsearch_sync_error else "pending"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error(f"Failed to get Elasticsearch status for file {file_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get Elasticsearch status: {e}")
+
+
+@router.post("/{file_id}/elasticsearch-retry")
+async def retry_elasticsearch_sync(file_id: int, background: BackgroundTasks, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    """
+    Retry Elasticsearch sync for a file
+    """
+    log = logging.getLogger("upload")
+    try:
+        file_obj = db.query(FileModel).filter(FileModel.id == file_id).first()
+        if not file_obj:
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        if file_obj.status != "processed":
+            raise HTTPException(status_code=400, detail="File must be processed before syncing to Elasticsearch")
+        
+        # Reset sync status
+        file_obj.elasticsearch_synced = False
+        file_obj.elasticsearch_sync_error = None
+        db.add(file_obj)
+        db.commit()
+        
+        # Start background sync
+        def sync_elasticsearch():
+            try:
+                sync_service = DataSyncService()
+                success = sync_service.sync_file_to_elasticsearch(file_id)
+                
+                # Update status
+                file_obj.elasticsearch_synced = success
+                if not success:
+                    file_obj.elasticsearch_sync_error = "Sync failed - check logs for details"
+                else:
+                    file_obj.elasticsearch_sync_error = None
+                db.add(file_obj)
+                db.commit()
+                
+                log.info(f"Elasticsearch sync {'completed' if success else 'failed'} for file {file_id}")
+            except Exception as e:
+                log.error(f"Elasticsearch sync failed for file {file_id}: {e}")
+                file_obj.elasticsearch_synced = False
+                file_obj.elasticsearch_sync_error = str(e)
+                db.add(file_obj)
+                db.commit()
+        
+        background.add_task(sync_elasticsearch)
+        
+        return {
+            "message": "Elasticsearch sync started in background",
+            "file_id": file_id,
+            "status": "syncing"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error(f"Failed to start Elasticsearch sync for file {file_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to start Elasticsearch sync: {e}")
 
 
