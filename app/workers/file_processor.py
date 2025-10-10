@@ -36,7 +36,7 @@ def get_common_part_numbers(session: Session, table_name: str, limit: int = 100)
 		return []
 
 
-def run(file_id: int, content: bytes | None = None, filename: str | None = None) -> None:
+def run(file_id: int, content: bytes | None = None, filename: str | None = None, file_path: str | None = None) -> None:
 	session: Session = SessionLocal()
 	try:
 		obj = session.get(FileModel, file_id)
@@ -65,7 +65,18 @@ def run(file_id: int, content: bytes | None = None, filename: str | None = None)
 		
 		data = content
 		name = filename or obj.filename
-		if data is None:
+		if data is None and file_path:
+			# Read from file path for large files
+			try:
+				with open(file_path, "rb") as f:
+					data = f.read()
+			except Exception as e:
+				logger.error(f"Failed to read file {file_path}: {e}")
+				obj.status = "failed"
+				session.add(obj)
+				session.commit()
+				return
+		elif data is None:
 			bucket = settings.SUPABASE_STORAGE_BUCKET
 			if not bucket:
 				logger.error(f"No storage bucket configured for file {file_id}")

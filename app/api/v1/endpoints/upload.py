@@ -21,6 +21,17 @@ def _process_file_background(file_id: int) -> None:
     # Legacy placeholder kept for compatibility
     return None
 
+def process_file_from_path(file_id: int, file_path: str, filename: str) -> None:
+    """Process file from disk path instead of memory content for large files."""
+    try:
+        from app.workers.file_processor import FileProcessor
+        processor = FileProcessor()
+        processor.run(file_id, content=None, filename=filename, file_path=file_path)
+    except Exception as e:
+        import logging
+        log = logging.getLogger("upload")
+        log.error("Background processing failed for file %s: %s", file_id, e)
+
 
 # In-memory upload session registry for chunked uploads (Cloud Run safe within instance)
 # Maps upload_id -> { file_id, tmp_path, filename, content_type, received_bytes, created_at }
@@ -152,12 +163,37 @@ async def multipart_complete(
         if not obj:
             raise HTTPException(status_code=404, detail="File not found")
         
-        # Read content from temp file
+        # Read content from temp file efficiently
         try:
             import os
-            with open(tmp_path, "rb") as f:
-                content = f.read()
-            size_bytes = len(content)
+            size_bytes = os.path.getsize(tmp_path)
+            # For large files, don't read the entire content into memory
+            # Just update the file record and let background processing handle the actual content
+            if size_bytes > 100 * 1024 * 1024:  # 100MB threshold
+                # For very large files, skip immediate Supabase upload and process directly
+                obj.storage_path = None
+                obj.size_bytes = size_bytes
+                obj.status = "processing"
+                db.add(obj)
+                db.commit()
+                db.refresh(obj)
+                
+                # Start processing with file path instead of content
+                try:
+                    import threading
+                    threading.Thread(target=process_file_from_path, args=(obj.id, tmp_path, filename), daemon=True).start()
+                except Exception as thread_err:
+                    log = logging.getLogger("upload")
+                    log.warning("Thread start failed in multipart complete large file: %s", thread_err)
+                
+                # Clean up session after successful processing start
+                _multipart_sessions.pop(upload_id, None)
+                
+                return {"file_id": file_id, "status": "processing", "size_bytes": obj.size_bytes}
+            else:
+                # For smaller files, read content and proceed normally
+                with open(tmp_path, "rb") as f:
+                    content = f.read()
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Read temp failed: {e}")
 
