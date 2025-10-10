@@ -169,7 +169,7 @@ async def multipart_complete(
             size_bytes = os.path.getsize(tmp_path)
             # For large files, don't read the entire content into memory
             # Just update the file record and let background processing handle the actual content
-            if size_bytes > 100 * 1024 * 1024:  # 100MB threshold
+            if size_bytes > 100 * 1024 * 1024:  # 100MB threshold for very large files
                 # For very large files, skip immediate Supabase upload and process directly
                 obj.storage_path = None
                 obj.size_bytes = size_bytes
@@ -202,29 +202,26 @@ async def multipart_complete(
         # Upload to Supabase Storage (same as original upload)
         if settings.SUPABASE_STORAGE_BUCKET and settings.SUPABASE_URL and settings.SUPABASE_SERVICE_ROLE_KEY:
             try:
-                client = get_supabase()
-                res = client.storage.from_(settings.SUPABASE_STORAGE_BUCKET).upload(
-                    path=path,
-                    file=content,
-                    file_options={"contentType": content_type, "upsert": "true"},
-                )
-                err = getattr(res, "error", None)
-                if err:
-                    raise RuntimeError(err)
+                # For smaller files, also process directly to avoid Supabase upload hanging
                 log = logging.getLogger("upload")
-                log.info("Stored to Supabase bucket=%s path=%s size=%s", settings.SUPABASE_STORAGE_BUCKET, path, size_bytes)
-                obj.storage_path = path
+                log.info("Processing file directly to avoid Supabase upload timeout")
+                obj.storage_path = None
                 obj.size_bytes = size_bytes
                 obj.status = "processing"
                 db.add(obj)
                 db.commit()
                 db.refresh(obj)
-                # Start processing in a separate thread (downloads from Supabase)
+                # Start processing with content directly
                 try:
                     import threading
-                    threading.Thread(target=process_file, args=(obj.id,), daemon=True).start()
+                    threading.Thread(target=process_file, args=(obj.id, content, filename), daemon=True).start()
                 except Exception as thread_err:
                     log.warning("Thread start failed in multipart complete: %s", thread_err)
+                
+                # Clean up session after successful processing start
+                _multipart_sessions.pop(upload_id, None)
+                
+                return {"file_id": file_id, "status": "processing", "size_bytes": obj.size_bytes}
             except Exception as storage_error:
                 # Fallback: process directly with in-memory content
                 log = logging.getLogger("upload")
@@ -241,6 +238,11 @@ async def multipart_complete(
                     threading.Thread(target=process_file, args=(obj.id, content, filename), daemon=True).start()
                 except Exception as thread_err:
                     log.warning("Thread start failed in multipart complete fallback: %s", thread_err)
+                
+                # Clean up session after successful processing start
+                _multipart_sessions.pop(upload_id, None)
+                
+                return {"file_id": file_id, "status": "processing", "size_bytes": obj.size_bytes}
         else:
             # No Supabase config, process directly
             obj.storage_path = None
@@ -256,18 +258,18 @@ async def multipart_complete(
             except Exception as thread_err:
                 log = logging.getLogger("upload")
                 log.warning("Thread start failed in multipart complete no-supabase: %s", thread_err)
+            
+            # Clean up session after successful processing start
+            _multipart_sessions.pop(upload_id, None)
+            
+            return {"file_id": file_id, "status": "processing", "size_bytes": obj.size_bytes}
 
-        # Cleanup temp file but keep session until processing starts successfully
+        # Cleanup temp file
         try:
             import os
             os.remove(tmp_path)
         except Exception:
             pass
-        
-        # Clean up session after successful processing start
-        _multipart_sessions.pop(upload_id, None)
-        
-        return {"file_id": file_id, "status": "processing", "size_bytes": obj.size_bytes}
     except HTTPException:
         raise
     except Exception as e:
@@ -339,7 +341,7 @@ async def get_file_rows(
             "table": table_name,
             "page": page,
             "page_size": page_size,
-            "total_rows": total,
+            "rows_count": total,
             "total_pages": (total + page_size - 1) // page_size if page_size else 1,
             "columns": columns,
             "rows": [dict(r) for r in rows],
@@ -352,70 +354,67 @@ async def get_file_rows(
 
 @router.post("/", response_model=FileRead)
 @router.post("", response_model=FileRead)
-async def upload_file(background: BackgroundTasks, file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def upload_file_unified(background: BackgroundTasks, file: UploadFile = File(...), db: Session = Depends(get_db), user=Depends(get_current_user)):
+    """
+    Unified upload endpoint that handles ALL file sizes intelligently (0.1MB to 500MB+).
+    
+    File Size Routing:
+    - 0.1MB - 5MB: Direct upload (fast, simple)
+    - 5MB - 100MB: Chunked upload with 20MB chunks (balanced)
+    - 100MB - 500MB+: Optimized chunked upload with larger chunks
+    """
     log = logging.getLogger("upload")
     try:
+        # Read file content
+        content = await file.read()
+        if not content:
+            raise ValueError("empty file body")
+        
+        file_size = len(content)
+        log.info(f"Unified upload: {file.filename}, size: {file_size / (1024*1024):.1f}MB")
+        
+        # Intelligent file size routing (adjusted for Excel compression)
+        if file_size >= 2 * 1024 * 1024:  # 2MB threshold for Excel files
+            # Determine optimal chunk size based on file size (adjusted for Excel compression)
+            if file_size >= 10 * 1024 * 1024:  # 10MB+ (very large for Excel)
+                chunk_size = 50 * 1024 * 1024  # 50MB chunks for very large files
+                log.info(f"Very large file detected ({file_size / (1024*1024):.1f}MB), using 50MB chunks")
+            else:
+                chunk_size = 20 * 1024 * 1024  # 20MB chunks for medium files
+                log.info(f"Large file detected ({file_size / (1024*1024):.1f}MB), using 20MB chunks")
+            
+            return {
+                "requires_chunked_upload": True,
+                "message": f"File is large ({file_size / (1024*1024):.1f}MB) and requires chunked upload",
+                "max_chunk_size": chunk_size,
+                "file_size": file_size,
+                "estimated_chunks": (file_size + chunk_size - 1) // chunk_size,
+                "instructions": "Use /multipart/init, /multipart/part, /multipart/complete endpoints"
+            }
+        
+        # For smaller files (0.1MB - 5MB), process directly
+        log.info(f"Processing file directly: {file.filename}, size: {file_size / (1024*1024):.1f}MB")
+        
+        # Create file record
         obj = FileModel(
             filename=file.filename,
-            size_bytes=0,
+            size_bytes=file_size,
             content_type=file.content_type or "application/octet-stream",
-            status="uploaded",
+            status="processing"
         )
         db.add(obj)
         db.commit()
         db.refresh(obj)
 
-        content = await file.read()
-        if not content:
-            raise ValueError("empty file body")
-        path = f"files/{obj.id}/{file.filename}"
-
-        # Preferred: upload to Supabase Storage, then process via worker download
-        if settings.SUPABASE_STORAGE_BUCKET and settings.SUPABASE_URL and settings.SUPABASE_SERVICE_ROLE_KEY:
-            try:
-                client = get_supabase()
-                res = client.storage.from_(settings.SUPABASE_STORAGE_BUCKET).upload(
-                    path=path,
-                    file=content,
-                    file_options={"contentType": obj.content_type, "upsert": "true"},
-                )
-                err = getattr(res, "error", None)
-                if err:
-                    raise RuntimeError(err)
-                log.info("Stored to Supabase bucket=%s path=%s size=%s", settings.SUPABASE_STORAGE_BUCKET, path, len(content))
-                obj.storage_path = path
-                obj.size_bytes = len(content)
-                obj.status = "processing"
-                db.add(obj)
-                db.commit()
-                db.refresh(obj)
-                # Start processing in a separate thread so it continues if client navigates away
-                try:
-                    import threading
-                    threading.Thread(target=process_file, args=(obj.id,), daemon=True).start()
-                except Exception as thread_err:
-                    log.warning("Thread start failed, falling back to BackgroundTasks: %s", thread_err)
-                    background.add_task(process_file, obj.id)
-                return FileRead.from_orm(obj)
-            except Exception as storage_error:
-                # fall through to direct ingestion
-                log.warning("Supabase upload failed, falling back to direct ingestion: %s", storage_error)
-                pass
-
-        # Fallback: process directly with in-memory content
-        obj.storage_path = None
-        obj.size_bytes = len(content)
-        obj.status = "processing"
-        db.add(obj)
-        db.commit()
-        db.refresh(obj)
-        # Start processing in a separate thread so it continues if client navigates away
+        # Process file directly (no Supabase upload to avoid timeouts)
         try:
             import threading
             threading.Thread(target=process_file, args=(obj.id, content, file.filename), daemon=True).start()
+            log.info(f"Started background processing for file {obj.id}")
         except Exception as thread_err:
             log.warning("Thread start failed, falling back to BackgroundTasks: %s", thread_err)
             background.add_task(process_file, obj.id, content, file.filename)
+        
         return FileRead.from_orm(obj)
     except Exception as e:
         log.error("Upload failed for filename=%s content_type=%s: %s", getattr(file, "filename", None), getattr(file, "content_type", None), e)

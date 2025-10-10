@@ -128,78 +128,89 @@ class BulkExcelParser:
                 else:
                     # Use openpyxl for better performance on large files and robust header detection
                     wb = load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
-                    ws = wb.worksheets[0]
+                    
+                    # Process ALL sheets, not just the first one
+                    all_data_rows = []
+                    all_headers = []
+                    
+                    for sheet_idx, ws in enumerate(wb.worksheets):
+                        print(f"Processing sheet {sheet_idx + 1}: {ws.title}")
+                        
+                        # Extract ALL rows from this sheet (no limit for large datasets)
+                        raw_rows = []
+                        for row in ws.iter_rows(values_only=True):
+                            raw_rows.append(list(row))
+                        
+                        if not raw_rows:
+                            continue
+                        
+                        # Find header row by matching required header variations
+                        header_variations = {
+                            "part number": ["part number", "part_number", "partnumber", "part no", "partno", "pn"],
+                            "part name": ["part name", "part_name", "partname", "description", "desc", "item name"],
+                            "quantity": ["quantity", "qty", "amount", "count", "units"],
+                            "manufacturer name": ["manufacturer name", "manufacturer_name", "manufacturer", "mfg", "brand", "supplier"],
+                        }
 
-                    # Extract up to first 2000 rows defensively
-                    raw_rows = []
-                    max_take = 2000
-                    count = 0
-                    for row in ws.iter_rows(values_only=True):
-                        raw_rows.append(list(row))
-                        count += 1
-                        if count >= max_take:
-                            break
+                        def normalize_cell(v):
+                            if v is None:
+                                return ""
+                            return str(v).strip().lower()
+
+                        header_row_index = 0
+                        best_score = -1
+                        # Scan first 20 rows for a plausible header row
+                        for idx, row in enumerate(raw_rows[:20]):
+                            normalized = [normalize_cell(c) for c in row]
+                            score = 0
+                            for required, variants in header_variations.items():
+                                if any(v in normalized for v in variants):
+                                    score += 1
+                            if score > best_score:
+                                best_score = score
+                                header_row_index = idx
+
+                        headers_raw = raw_rows[header_row_index]
+                        # Determine width using the widest row among header+next 50 rows
+                        width = max(len(headers_raw), max((len(r) for r in raw_rows[header_row_index:header_row_index+50]), default=len(headers_raw)))
+
+                        # Build headers with fallbacks "Column_i" for empty cells
+                        headers = []
+                        for i in range(width):
+                            val = headers_raw[i] if i < len(headers_raw) else None
+                            headers.append(str(val) if val is not None and str(val).strip() else f"Column_{i}")
+
+                        # Collect data rows after the header row, pad/truncate to width
+                        data_rows = []
+                        for r in raw_rows[header_row_index+1:]:
+                            row_vals = list(r)
+                            if len(row_vals) < width:
+                                row_vals = row_vals + [None] * (width - len(row_vals))
+                            elif len(row_vals) > width:
+                                row_vals = row_vals[:width]
+                            data_rows.append(row_vals)
+
+                        # Drop leading completely empty rows
+                        def is_all_empty(row):
+                            return all((c is None or str(c).strip() == "") for c in row)
+                        while data_rows and is_all_empty(data_rows[0]):
+                            data_rows.pop(0)
+
+                        if data_rows:
+                            # Store headers from first sheet, combine data from all sheets
+                            if not all_headers:
+                                all_headers = headers
+                            all_data_rows.extend(data_rows)
+                            print(f"Sheet {sheet_idx + 1}: Found {len(data_rows)} data rows")
+                    
                     wb.close()
+                    
+                    if not all_data_rows:
+                        return [], ["No data rows found in any sheet"]
 
-                    if not raw_rows:
-                        return [], ["File is empty"]
-
-                    # Find header row by matching required header variations
-                    header_variations = {
-                        "part number": ["part number", "part_number", "partnumber", "part no", "partno", "pn"],
-                        "part name": ["part name", "part_name", "partname", "description", "desc", "item name"],
-                        "quantity": ["quantity", "qty", "amount", "count", "units"],
-                        "manufacturer name": ["manufacturer name", "manufacturer_name", "manufacturer", "mfg", "brand", "supplier"],
-                    }
-
-                    def normalize_cell(v):
-                        if v is None:
-                            return ""
-                        return str(v).strip().lower()
-
-                    header_row_index = 0
-                    best_score = -1
-                    # Scan first 20 rows for a plausible header row
-                    for idx, row in enumerate(raw_rows[:20]):
-                        normalized = [normalize_cell(c) for c in row]
-                        score = 0
-                        for required, variants in header_variations.items():
-                            if any(v in normalized for v in variants):
-                                score += 1
-                        if score > best_score:
-                            best_score = score
-                            header_row_index = idx
-
-                    headers_raw = raw_rows[header_row_index]
-                    # Determine width using the widest row among header+next 50 rows
-                    width = max(len(headers_raw), max((len(r) for r in raw_rows[header_row_index:header_row_index+50]), default=len(headers_raw)))
-
-                    # Build headers with fallbacks "Column_i" for empty cells
-                    headers = []
-                    for i in range(width):
-                        val = headers_raw[i] if i < len(headers_raw) else None
-                        headers.append(str(val) if val is not None and str(val).strip() else f"Column_{i}")
-
-                    # Collect data rows after the header row, pad/truncate to width
-                    data_rows = []
-                    for r in raw_rows[header_row_index+1:]:
-                        row_vals = list(r)
-                        if len(row_vals) < width:
-                            row_vals = row_vals + [None] * (width - len(row_vals))
-                        elif len(row_vals) > width:
-                            row_vals = row_vals[:width]
-                        data_rows.append(row_vals)
-
-                    # Drop leading completely empty rows
-                    def is_all_empty(row):
-                        return all((c is None or str(c).strip() == "") for c in row)
-                    while data_rows and is_all_empty(data_rows[0]):
-                        data_rows.pop(0)
-
-                    if not data_rows:
-                        return [], ["No data rows found after header"]
-
-                    df = pd.DataFrame(data_rows, columns=headers)
+                    # Create DataFrame from all sheets combined
+                    df = pd.DataFrame(all_data_rows, columns=all_headers)
+                    print(f"Total rows from all sheets: {len(df)}")
             
             if df.empty:
                 return [], ["File contains no data"]
