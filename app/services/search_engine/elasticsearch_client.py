@@ -107,7 +107,7 @@ class ElasticsearchBulkSearch:
             logger.error(f"❌ Failed to create Elasticsearch index: {e}")
             return False
     
-    def index_data(self, data: List[Dict[str, Any]], file_id: int):
+    def index_data(self, data: List[Dict[str, Any]], file_id: int, refresh: bool = False):
         """Index data from PostgreSQL to Elasticsearch"""
         if not self.is_available():
             logger.warning("Elasticsearch not available, skipping data indexing")
@@ -137,15 +137,18 @@ class ElasticsearchBulkSearch:
                 }
                 documents.append(doc)
             
-            # Bulk index documents
-            success_count, failed_items = bulk(self.es, documents, chunk_size=1000)
+            # Bulk index documents with adaptive chunk size for massive datasets
+            chunk_size = 10000 if len(documents) > 50000 else 5000  # Larger chunks for massive datasets
+            success_count, failed_items = bulk(self.es, documents, chunk_size=chunk_size, request_timeout=120)
             logger.info(f"✅ Indexed {success_count} documents to Elasticsearch")
             
             if failed_items:
                 logger.warning(f"⚠️ {len(failed_items)} documents failed to index")
             
-            # Refresh index to make data searchable
-            self.es.indices.refresh(index=self.index_name)
+            # Only refresh if explicitly requested (for performance)
+            if refresh:
+                self.es.indices.refresh(index=self.index_name)
+            
             return True
             
         except Exception as e:

@@ -72,10 +72,15 @@ class Settings(BaseSettings):
     GOOGLE_CLOUD_SEARCH_INDEX_ID: str = os.getenv("GOOGLE_CLOUD_SEARCH_INDEX_ID", "parts-search-index")
     GOOGLE_APPLICATION_CREDENTIALS: Optional[str] = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
 
-    # Ingestion tuning
-    INGEST_BATCH_SIZE: int = 5000
-    CHROMA_UPSERT_CHUNK: int = 5000
-    DEFER_EMBEDDINGS: bool = False
+    # Ingestion tuning - Optimized for massive datasets (100MB+, 20M+ rows)
+    INGEST_BATCH_SIZE: int = 50000  # Optimized for massive files (20M+ rows)
+    CHROMA_UPSERT_CHUNK: int = 50000  # Increased for massive datasets
+    DEFER_EMBEDDINGS: bool = True  # Disable embeddings during upload for speed
+    
+    # Massive file processing settings
+    MASSIVE_FILE_THRESHOLD_MB: int = 50  # Files larger than 50MB get special treatment
+    MASSIVE_ROW_THRESHOLD: int = 1000000  # Files with 1M+ rows get special treatment
+    STREAMING_BATCH_SIZE: int = 100000  # For streaming processing of massive files
 
     model_config = SettingsConfigDict(env_file=".env", case_sensitive=True, extra="ignore")
 

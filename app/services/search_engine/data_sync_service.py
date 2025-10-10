@@ -63,8 +63,14 @@ class DataSyncService:
                 # Create Elasticsearch index if it doesn't exist
                 self.es_client.create_index(table_name, file_id)
                 
-                # Fetch data in batches to avoid memory issues
-                batch_size = 1000
+                # Adaptive batch sizing based on total rows for massive datasets
+                if total_rows > settings.MASSIVE_ROW_THRESHOLD:
+                    batch_size = 20000  # 20K rows per batch for massive files (20M+ rows)
+                    log_interval = 50  # Log every 50 batches for massive files
+                else:
+                    batch_size = 5000   # 5K rows per batch for smaller files
+                    log_interval = 10   # Log every 10 batches for smaller files
+                
                 offset = 0
                 synced_rows = 0
                 
@@ -110,7 +116,7 @@ class DataSyncService:
                         }
                         batch_records.append(record)
                     
-                    # Index batch to Elasticsearch
+                    # Index batch to Elasticsearch (without refresh for better performance)
                     success = self.es_client.index_data(batch_records, file_id)
                     if not success:
                         logger.error(f"Failed to index batch starting at offset {offset}")
@@ -119,8 +125,13 @@ class DataSyncService:
                     synced_rows += len(batch_records)
                     offset += batch_size
                     
-                    logger.info(f"📈 Synced {synced_rows}/{total_rows} rows ({synced_rows/total_rows*100:.1f}%)")
+                    # Log progress at adaptive intervals to reduce overhead
+                    if (offset // batch_size) % log_interval == 0:
+                        logger.info(f"📈 Synced {synced_rows}/{total_rows} rows ({synced_rows/total_rows*100:.1f}%)")
                 
+                # Final refresh to make all data searchable
+                logger.info("🔄 Refreshing Elasticsearch index...")
+                self.es_client.es.indices.refresh(index=self.es_client.index_name)
                 logger.info(f"✅ Successfully synced {synced_rows} rows from {table_name} to Elasticsearch")
                 return True
                 

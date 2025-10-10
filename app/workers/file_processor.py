@@ -7,6 +7,7 @@ from app.core.config import settings
 from app.models.database.file import File as FileModel
 from app.services.supabase_client import get_supabase
 from app.services.data_processor.batch_processor import process_in_batches
+from app.services.data_processor.massive_file_processor import process_massive_file_in_batches
 from app.services.database.index_manager import create_search_indexes
 from app.services.database.ultra_fast_index_manager import create_ultra_fast_indexes, optimize_table_for_bulk_search
 from app.services.cache.ultra_fast_cache_manager import ultra_fast_cache
@@ -124,14 +125,29 @@ def run(file_id: int, content: bytes | None = None, filename: str | None = None,
 		except Exception:
 			pass
 
-		total, table_name = process_in_batches(
-			session,
-			data,
-			name,
-			dataset_name=str(obj.id),
-			file_id=file_id,
-			cancel_check=is_cancelled,
-		)
+		# Choose processor based on file size for optimal performance
+		file_size_mb = len(data) / (1024 * 1024)
+		
+		if file_size_mb > settings.MASSIVE_FILE_THRESHOLD_MB:
+			logger.info(f"🚀 Using massive file processor for {file_size_mb:.1f}MB file")
+			total, table_name = process_massive_file_in_batches(
+				session,
+				data,
+				name,
+				dataset_name=str(obj.id),
+				file_id=file_id,
+				cancel_check=is_cancelled,
+			)
+		else:
+			logger.info(f"📦 Using standard batch processor for {file_size_mb:.1f}MB file")
+			total, table_name = process_in_batches(
+				session,
+				data,
+				name,
+				dataset_name=str(obj.id),
+				file_id=file_id,
+				cancel_check=is_cancelled,
+			)
 		obj.rows_count = total
 		# If cancelled mid-way, mark as cancelled instead of processed
 		try:
@@ -248,11 +264,33 @@ def run(file_id: int, content: bytes | None = None, filename: str | None = None,
 				# Update file record with ES sync status
 				obj.elasticsearch_synced = es_synced
 				if not es_synced:
-					obj.elasticsearch_sync_error = str(sync_err) if 'sync_err' in locals() else "Unknown error"
+					obj.elasticsearch_sync_error = "Sync failed - check logs for details"
 				else:
 					obj.elasticsearch_sync_error = None
 				session.add(obj)
 				session.commit()
+				logger.info(f"✅ Updated file {file_id} ES sync status: {es_synced}")
+				
+				# Send WebSocket notification for status update
+				try:
+					from app.core.websocket_manager import websocket_manager
+					msg = {
+						"type": "elasticsearch_sync_complete",
+						"file_id": file_id,
+						"elasticsearch_synced": es_synced,
+						"elasticsearch_sync_error": obj.elasticsearch_sync_error
+					}
+					loop = None
+					try:
+						loop = asyncio.get_running_loop()
+					except RuntimeError:
+						loop = None
+					if loop and loop.is_running():
+						loop.create_task(websocket_manager.send_progress(str(file_id), msg))
+					else:
+						asyncio.run(websocket_manager.send_progress(str(file_id), msg))
+				except Exception:
+					pass
 				
 			except Exception as sync_err:
 				logger.warning(f"Elasticsearch sync failed for file {file_id}: {sync_err}")
@@ -261,6 +299,28 @@ def run(file_id: int, content: bytes | None = None, filename: str | None = None,
 				obj.elasticsearch_sync_error = str(sync_err)
 				session.add(obj)
 				session.commit()
+				logger.info(f"❌ Updated file {file_id} ES sync status: failed")
+				
+				# Send WebSocket notification for status update
+				try:
+					from app.core.websocket_manager import websocket_manager
+					msg = {
+						"type": "elasticsearch_sync_complete",
+						"file_id": file_id,
+						"elasticsearch_synced": False,
+						"elasticsearch_sync_error": str(sync_err)
+					}
+					loop = None
+					try:
+						loop = asyncio.get_running_loop()
+					except RuntimeError:
+						loop = None
+					if loop and loop.is_running():
+						loop.create_task(websocket_manager.send_progress(str(file_id), msg))
+					else:
+						asyncio.run(websocket_manager.send_progress(str(file_id), msg))
+				except Exception:
+					pass
 			
 			loop = None
 			try:

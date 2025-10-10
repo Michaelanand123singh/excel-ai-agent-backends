@@ -22,11 +22,25 @@ def process_in_batches(db: Session, file_bytes: bytes, filename: str, dataset_na
 	table_name = f"ds_{dataset_name}"
 	table = None
 	batch_count = 0
+	
+	# Determine optimal batch size based on file size and row count
+	file_size_mb = len(file_bytes) / (1024 * 1024)
+	
 	if batch_size is None or batch_size <= 0:
-		batch_size = max(1000, int(settings.INGEST_BATCH_SIZE))
-	# Hard-cap batch size to avoid driver/DB param limits regardless of env
-	if batch_size > 5000:
-		batch_size = 5000
+		# Use adaptive batch sizing for massive files
+		if file_size_mb > settings.MASSIVE_FILE_THRESHOLD_MB:
+			batch_size = settings.STREAMING_BATCH_SIZE  # 100K for massive files
+		else:
+			batch_size = max(1000, int(settings.INGEST_BATCH_SIZE))
+	
+	# For massive files, allow much larger batch sizes
+	if file_size_mb > settings.MASSIVE_FILE_THRESHOLD_MB:
+		# Allow up to 100K rows per batch for massive files
+		batch_size = min(batch_size, settings.STREAMING_BATCH_SIZE)
+	else:
+		# Standard cap for smaller files
+		if batch_size > 10000:
+			batch_size = 10000
 
 	# Resumable: find how many rows already inserted
 	# Note: counts data rows, not including header
@@ -116,8 +130,8 @@ def process_in_batches(db: Session, file_bytes: bytes, filename: str, dataset_na
 		except Exception:
 			pass
 
-		# Send batch progress
-		if file_id:
+		# Send batch progress (reduced frequency for better performance)
+		if file_id and batch_count % 5 == 0:  # Only send every 5 batches
 			try:
 				# Lazy import to avoid pickling/init issues
 				from app.core.websocket_manager import websocket_manager
@@ -177,8 +191,8 @@ def process_in_batches(db: Session, file_bytes: bytes, filename: str, dataset_na
 				except Exception:
 					pass
 			
-			# Send embedding progress (lightweight notification)
-			if file_id:
+			# Send embedding progress (reduced frequency for better performance)
+			if file_id and batch_count % 10 == 0:  # Only send every 10 batches
 				try:
 					from app.core.websocket_manager import websocket_manager
 					msg = {
