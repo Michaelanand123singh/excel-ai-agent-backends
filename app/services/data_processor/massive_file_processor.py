@@ -66,16 +66,18 @@ class MassiveFileProcessor:
                 return []
             
             try:
-                # Use bulk insert for better performance
-                result = db.execute(table.insert().values(rows))
-                db.commit()
-                
-                # Get inserted IDs for tracking
-                if hasattr(result, 'inserted_primary_key_rows'):
-                    return [str(row[0]) for row in result.inserted_primary_key_rows]
+                # Use correct bulk insert syntax (same as regular batch processor)
+                if settings.DEFER_EMBEDDINGS:
+                    # Faster path: no RETURNING to reduce server-side overhead
+                    db.execute(table.insert(), rows)
+                    inserted = []
                 else:
-                    # Fallback: return count-based IDs
-                    return [f"batch_{batch_count}_{i}" for i in range(len(rows))]
+                    result = db.execute(table.insert().returning(table.c.id), rows)
+                    inserted = [str(row_id[0]) for row_id in result.fetchall()]
+                
+                db.commit()
+                logger.info(f"✅ Inserted {len(rows)} rows successfully")
+                return inserted
                     
             except Exception as e:
                 logger.error(f"❌ Batch insert failed: {e}")
@@ -92,6 +94,8 @@ class MassiveFileProcessor:
                     raise e
         
         # Process file in streaming chunks
+        logger.info(f"🔄 Starting to process {filename} with batch size {batch_size:,}")
+        
         for batch in iter_rows(file_bytes, filename, chunk_size=batch_size, skip_rows=already):
             # Check for cancellation
             if cancel_check and cancel_check():
@@ -115,14 +119,21 @@ class MassiveFileProcessor:
                 logger.info(f"📋 Created table schema: {table_name}")
             
             if not batch:
+                logger.warning(f"⚠️ Empty batch {batch_count}, skipping")
                 continue
             
             batch_count += 1
+            logger.info(f"📦 Processing batch {batch_count} with {len(batch)} rows")
             
             # Insert batch
             try:
                 inserted_ids = _safe_insert(batch)
-                self.processed_rows += len(inserted_ids)
+                
+                # Count rows correctly (same logic as regular batch processor)
+                if settings.DEFER_EMBEDDINGS:
+                    self.processed_rows += len(batch)
+                else:
+                    self.processed_rows += len(inserted_ids)
                 
                 # Progress logging for massive files
                 self._log_progress(batch_count, file_id)

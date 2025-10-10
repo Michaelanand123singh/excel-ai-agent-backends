@@ -130,6 +130,7 @@ def run(file_id: int, content: bytes | None = None, filename: str | None = None,
 		
 		if file_size_mb > settings.MASSIVE_FILE_THRESHOLD_MB:
 			logger.info(f"🚀 Using massive file processor for {file_size_mb:.1f}MB file")
+			logger.info(f"📊 File size: {len(data):,} bytes, Threshold: {settings.MASSIVE_FILE_THRESHOLD_MB}MB")
 			total, table_name = process_massive_file_in_batches(
 				session,
 				data,
@@ -138,6 +139,7 @@ def run(file_id: int, content: bytes | None = None, filename: str | None = None,
 				file_id=file_id,
 				cancel_check=is_cancelled,
 			)
+			logger.info(f"✅ Massive file processing completed: {total:,} rows processed")
 		else:
 			logger.info(f"📦 Using standard batch processor for {file_size_mb:.1f}MB file")
 			total, table_name = process_in_batches(

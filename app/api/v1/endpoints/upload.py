@@ -203,15 +203,30 @@ async def multipart_complete(
         # Upload to Supabase Storage (same as original upload)
         if settings.SUPABASE_STORAGE_BUCKET and settings.SUPABASE_URL and settings.SUPABASE_SERVICE_ROLE_KEY:
             try:
-                # For smaller files, also process directly to avoid Supabase upload hanging
                 log = logging.getLogger("upload")
-                log.info("Processing file directly to avoid Supabase upload timeout")
-                obj.storage_path = None
+                log.info(f"Uploading {filename} to Supabase storage...")
+                
+                # Upload to Supabase storage
+                client = get_supabase()
+                result = client.storage.from_(settings.SUPABASE_STORAGE_BUCKET).upload(
+                    path=path,
+                    file=content,
+                    file_options={"content-type": content_type}
+                )
+                
+                if result.get('error'):
+                    log.warning(f"Supabase upload failed: {result['error']}")
+                    obj.storage_path = None
+                else:
+                    log.info(f"Successfully uploaded to Supabase: {path}")
+                    obj.storage_path = path
+                
                 obj.size_bytes = size_bytes
                 obj.status = "processing"
                 db.add(obj)
                 db.commit()
                 db.refresh(obj)
+                
                 # Start processing with content directly
                 try:
                     import threading
