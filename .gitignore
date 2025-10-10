@@ -1,17 +1,10 @@
-# Large files that should not be committed
-*.xlsx
-*.xls
-*.csv
-*.zip
-*.rar
-*.7z
-*.tar.gz
-*.tar.bz2
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*.$py.class
 
-# Test files
-test_*.py
-check_*.py
-*_test.py
+# C extensions
+*.so
 
 # Temporary files
 temp/
