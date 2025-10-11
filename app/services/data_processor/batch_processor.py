@@ -142,19 +142,11 @@ def process_in_batches(db: Session, file_bytes: bytes, filename: str, dataset_na
 					"current_batch": int(batch_count),
 					"processing_stage": "processing_data"
 				}
-				# Best-effort non-blocking send
-				loop = None
-				try:
-					loop = asyncio.get_running_loop()
-				except RuntimeError:
-					loop = None
-				if loop and loop.is_running():
-					loop.create_task(websocket_manager.send_progress(str(file_id), message))
-				else:
-					asyncio.run(websocket_manager.send_progress(str(file_id), message))
-			except Exception:
+				# Use sync wrapper to avoid asyncio issues
+				websocket_manager.send_progress_sync(str(file_id), message)
+			except Exception as e:
 				# Never fail ingestion due to progress update issues
-				pass
+				log.warning(f"Failed to send batch progress: {e}")
 
 		# Build texts for embeddings from string-like columns
 		string_cols: List[str] = []
@@ -201,17 +193,9 @@ def process_in_batches(db: Session, file_bytes: bytes, filename: str, dataset_na
 						"current_batch": int(batch_count),
 						"processing_stage": "embedding_upsert"
 					}
-					loop = None
-					try:
-						loop = asyncio.get_running_loop()
-					except RuntimeError:
-						loop = None
-					if loop and loop.is_running():
-						loop.create_task(websocket_manager.send_progress(str(file_id), msg))
-					else:
-						asyncio.run(websocket_manager.send_progress(str(file_id), msg))
-				except Exception:
-					pass
+					websocket_manager.send_progress_sync(str(file_id), msg)
+				except Exception as e:
+					log.warning(f"Failed to send embedding progress: {e}")
 
 	if table is None:
 		table = build_table(metadata, table_name, [])

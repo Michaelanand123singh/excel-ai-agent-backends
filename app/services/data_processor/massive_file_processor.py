@@ -183,18 +183,9 @@ class MassiveFileProcessor:
                         "speed_rows_per_sec": int(speed)
                     }
                     
-                    loop = None
-                    try:
-                        loop = asyncio.get_running_loop()
-                    except RuntimeError:
-                        loop = None
-                    
-                    if loop and loop.is_running():
-                        loop.create_task(websocket_manager.send_progress(str(file_id), message))
-                    else:
-                        asyncio.run(websocket_manager.send_progress(str(file_id), message))
-                except Exception:
-                    pass
+                    websocket_manager.send_progress_sync(str(file_id), message)
+                except Exception as e:
+                    logger.warning(f"Failed to send massive file progress: {e}")
             
             self.last_progress_time = current_time
 

@@ -23,6 +23,29 @@ def create_app() -> FastAPI:
         redoc_url="/redoc",
         openapi_url="/openapi.json",
     )
+    
+    # Configure request timeout for large uploads
+    from fastapi import Request
+    from fastapi.responses import JSONResponse
+    import asyncio
+    
+    @application.middleware("http")
+    async def timeout_middleware(request: Request, call_next):
+        # Set timeout based on endpoint
+        timeout_seconds = 300  # 5 minutes default
+        if "/upload/" in str(request.url):
+            timeout_seconds = 600  # 10 minutes for uploads
+        elif "/multipart/" in str(request.url):
+            timeout_seconds = 900  # 15 minutes for multipart uploads
+        
+        try:
+            response = await asyncio.wait_for(call_next(request), timeout=timeout_seconds)
+            return response
+        except asyncio.TimeoutError:
+            return JSONResponse(
+                status_code=408,
+                content={"detail": f"Request timeout after {timeout_seconds} seconds"}
+            )
 
     # Log CORS configuration on startup
     logger.info(f"🌐 CORS Origins: {settings.cors_origins_list}")

@@ -51,18 +51,10 @@ def run(file_id: int, content: bytes | None = None, filename: str | None = None,
 		# Notify start (best-effort websocket)
 		logger.info(f"Processing started for file {file_id}: {obj.filename}")
 		try:
-			loop = None
-			try:
-				loop = asyncio.get_running_loop()
-			except RuntimeError:
-				loop = None
 			message = {"type": "processing_started", "file_id": file_id}
-			if loop and loop.is_running():
-				loop.create_task(websocket_manager.send_progress(str(file_id), message))
-			else:
-				asyncio.run(websocket_manager.send_progress(str(file_id), message))
-		except Exception:
-			pass
+			websocket_manager.send_progress_sync(str(file_id), message)
+		except Exception as e:
+			logger.warning(f"Failed to send processing started notification: {e}")
 		
 		data = content
 		name = filename or obj.filename
@@ -89,18 +81,10 @@ def run(file_id: int, content: bytes | None = None, filename: str | None = None,
 		# Notify download complete
 		logger.info(f"Download complete for file {file_id}: {len(data)} bytes")
 		try:
-			loop = None
-			try:
-				loop = asyncio.get_running_loop()
-			except RuntimeError:
-				loop = None
 			message = {"type": "download_complete", "file_id": file_id, "size_bytes": len(data), "processing_stage": "downloaded"}
-			if loop and loop.is_running():
-				loop.create_task(websocket_manager.send_progress(str(file_id), message))
-			else:
-				asyncio.run(websocket_manager.send_progress(str(file_id), message))
-		except Exception:
-			pass
+			websocket_manager.send_progress_sync(str(file_id), message)
+		except Exception as e:
+			logger.warning(f"Failed to send download complete notification: {e}")
 
 		# Define a lightweight cancellation checker: treat non-processing status as cancellation
 		def is_cancelled() -> bool:
@@ -112,18 +96,10 @@ def run(file_id: int, content: bytes | None = None, filename: str | None = None,
 
 		# Notify data processing start
 		try:
-			loop = None
-			try:
-				loop = asyncio.get_running_loop()
-			except RuntimeError:
-				loop = None
 			message = {"type": "data_processing_started", "file_id": file_id, "processing_stage": "parsing_data"}
-			if loop and loop.is_running():
-				loop.create_task(websocket_manager.send_progress(str(file_id), message))
-			else:
-				asyncio.run(websocket_manager.send_progress(str(file_id), message))
-		except Exception:
-			pass
+			websocket_manager.send_progress_sync(str(file_id), message)
+		except Exception as e:
+			logger.warning(f"Failed to send data processing started notification: {e}")
 
 		# Choose processor based on file size for optimal performance
 		file_size_mb = len(data) / (1024 * 1024)
@@ -163,18 +139,18 @@ def run(file_id: int, content: bytes | None = None, filename: str | None = None,
 		session.add(obj)
 		session.commit()
 		
-		# Create search indexes for faster queries
+		# Create search indexes for faster queries (temporarily disabled for timeout issues)
 		try:
-			create_search_indexes(session, table_name)
-			logger.info(f"Created search indexes for table {table_name}")
+			# create_search_indexes(session, table_name)
+			logger.info(f"Skipped search indexes for table {table_name} (timeout issues)")
 		except Exception as e:
 			logger.warning(f"Failed to create indexes for table {table_name}: {e}")
 		
-		# Create ultra-fast indexes for bulk search optimization
+		# Create ultra-fast indexes for bulk search optimization (temporarily disabled)
 		try:
-			create_ultra_fast_indexes(session, table_name)
-			optimize_table_for_bulk_search(session, table_name)
-			logger.info(f"Created ultra-fast indexes for table {table_name}")
+			# create_ultra_fast_indexes(session, table_name)
+			# optimize_table_for_bulk_search(session, table_name)
+			logger.info(f"Skipped ultra-fast indexes for table {table_name} (timeout issues)")
 		except Exception as e:
 			logger.warning(f"Failed to create ultra-fast indexes for table {table_name}: {e}")
 		
@@ -226,18 +202,10 @@ def run(file_id: int, content: bytes | None = None, filename: str | None = None,
 		
 		# Notify PostgreSQL storage complete
 		try:
-			loop = None
-			try:
-				loop = asyncio.get_running_loop()
-			except RuntimeError:
-				loop = None
 			message = {"type": "postgresql_storage_complete", "file_id": file_id, "total_rows": int(total), "processing_stage": "postgresql_ready"}
-			if loop and loop.is_running():
-				loop.create_task(websocket_manager.send_progress(str(file_id), message))
-			else:
-				asyncio.run(websocket_manager.send_progress(str(file_id), message))
-		except Exception:
-			pass
+			websocket_manager.send_progress_sync(str(file_id), message)
+		except Exception as e:
+			logger.warning(f"Failed to send PostgreSQL storage complete notification: {e}")
 
 		# Notify processing complete
 		logger.info(f"Processing complete for file {file_id}: {total} rows processed")
@@ -248,18 +216,10 @@ def run(file_id: int, content: bytes | None = None, filename: str | None = None,
 			try:
 				# Notify Elasticsearch sync started
 				try:
-					loop = None
-					try:
-						loop = asyncio.get_running_loop()
-					except RuntimeError:
-						loop = None
 					msg = {"type": "elasticsearch_sync_started", "file_id": file_id, "processing_stage": "elasticsearch_syncing"}
-					if loop and loop.is_running():
-						loop.create_task(websocket_manager.send_progress(str(file_id), msg))
-					else:
-						asyncio.run(websocket_manager.send_progress(str(file_id), msg))
-				except Exception:
-					pass
+					websocket_manager.send_progress_sync(str(file_id), msg)
+				except Exception as e:
+					logger.warning(f"Failed to send Elasticsearch sync started notification: {e}")
 
 				es_synced = sync_service.sync_file_to_elasticsearch(file_id)
 				
@@ -275,24 +235,15 @@ def run(file_id: int, content: bytes | None = None, filename: str | None = None,
 				
 				# Send WebSocket notification for status update
 				try:
-					from app.core.websocket_manager import websocket_manager
 					msg = {
 						"type": "elasticsearch_sync_complete",
 						"file_id": file_id,
 						"elasticsearch_synced": es_synced,
 						"elasticsearch_sync_error": obj.elasticsearch_sync_error
 					}
-					loop = None
-					try:
-						loop = asyncio.get_running_loop()
-					except RuntimeError:
-						loop = None
-					if loop and loop.is_running():
-						loop.create_task(websocket_manager.send_progress(str(file_id), msg))
-					else:
-						asyncio.run(websocket_manager.send_progress(str(file_id), msg))
-				except Exception:
-					pass
+					websocket_manager.send_progress_sync(str(file_id), msg)
+				except Exception as e:
+					logger.warning(f"Failed to send Elasticsearch sync complete notification: {e}")
 				
 			except Exception as sync_err:
 				logger.warning(f"Elasticsearch sync failed for file {file_id}: {sync_err}")
@@ -305,30 +256,16 @@ def run(file_id: int, content: bytes | None = None, filename: str | None = None,
 				
 				# Send WebSocket notification for status update
 				try:
-					from app.core.websocket_manager import websocket_manager
 					msg = {
 						"type": "elasticsearch_sync_complete",
 						"file_id": file_id,
 						"elasticsearch_synced": False,
 						"elasticsearch_sync_error": str(sync_err)
 					}
-					loop = None
-					try:
-						loop = asyncio.get_running_loop()
-					except RuntimeError:
-						loop = None
-					if loop and loop.is_running():
-						loop.create_task(websocket_manager.send_progress(str(file_id), msg))
-					else:
-						asyncio.run(websocket_manager.send_progress(str(file_id), msg))
-				except Exception:
-					pass
+					websocket_manager.send_progress_sync(str(file_id), msg)
+				except Exception as e:
+					logger.warning(f"Failed to send Elasticsearch sync error notification: {e}")
 			
-			loop = None
-			try:
-				loop = asyncio.get_running_loop()
-			except RuntimeError:
-				loop = None
 			message = {
 				"type": "processing_complete", 
 				"file_id": file_id, 
@@ -338,12 +275,9 @@ def run(file_id: int, content: bytes | None = None, filename: str | None = None,
 				"google_cloud_search_synced": bool(gcs_synced),
 				"elasticsearch_synced": bool(es_synced)
 			}
-			if loop and loop.is_running():
-				loop.create_task(websocket_manager.send_progress(str(file_id), message))
-			else:
-				asyncio.run(websocket_manager.send_progress(str(file_id), message))
-		except Exception:
-			pass
+			websocket_manager.send_progress_sync(str(file_id), message)
+		except Exception as e:
+			logger.warning(f"Failed to send processing complete notification: {e}")
 		
 	except Exception as e:
 		session.rollback()

@@ -1,5 +1,6 @@
 from fastapi import APIRouter, UploadFile, File, BackgroundTasks, Depends, HTTPException, status, Body, Query
 import logging
+import time
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
@@ -13,6 +14,7 @@ from app.core.config import settings
 from app.workers.file_processor import run as process_file
 from app.models.database.file import File as FileModel
 from app.services.search_engine.data_sync_service import DataSyncService
+from app.core.websocket_manager import websocket_manager
 
 
 router = APIRouter()
@@ -24,40 +26,91 @@ def _process_file_background(file_id: int) -> None:
 
 def process_file_from_path(file_id: int, file_path: str, filename: str) -> None:
     """Process file from disk path instead of memory content for large files."""
+    import logging
+    log = logging.getLogger("upload")
+    
     try:
-        from app.workers.file_processor import FileProcessor
-        processor = FileProcessor()
-        processor.run(file_id, content=None, filename=filename, file_path=file_path)
+        # Verify file exists before processing
+        import os
+        if not os.path.exists(file_path):
+            log.error(f"File not found for processing: {file_path}")
+            return
+        
+        from app.workers.file_processor import run
+        run(file_id, content=None, filename=filename, file_path=file_path)
+        
+        # Clean up temp file after successful processing
+        try:
+            os.remove(file_path)
+            log.info(f"Cleaned up temp file after processing: {file_path}")
+        except Exception as cleanup_err:
+            log.warning(f"Failed to cleanup temp file {file_path}: {cleanup_err}")
+            
     except Exception as e:
-        import logging
-        log = logging.getLogger("upload")
         log.error("Background processing failed for file %s: %s", file_id, e)
+        
+        # Update file status to failed
+        try:
+            from app.core.database import SessionLocal
+            db = SessionLocal()
+            try:
+                from app.models.database.file import File as FileModel
+                file_obj = db.get(FileModel, file_id)
+                if file_obj:
+                    file_obj.status = "failed"
+                    db.add(file_obj)
+                    db.commit()
+                    log.info(f"Updated file {file_id} status to failed")
+            finally:
+                db.close()
+        except Exception as status_err:
+            log.error(f"Failed to update file status to failed: {status_err}")
+        
+        # Clean up temp file on error
+        try:
+            import os
+            if os.path.exists(file_path):
+                os.remove(file_path)
+                log.info(f"Cleaned up temp file after error: {file_path}")
+        except Exception as cleanup_err:
+            log.warning(f"Failed to cleanup temp file after error {file_path}: {cleanup_err}")
 
 
 # In-memory upload session registry for chunked uploads (Cloud Run safe within instance)
 # Maps upload_id -> { file_id, tmp_path, filename, content_type, received_bytes, created_at }
 _multipart_sessions: dict[str, dict] = {}
+import threading
+_multipart_sessions_lock = threading.RLock()
 
-# Cleanup old sessions (older than 1 hour)
+# Cleanup old sessions (older than 30 minutes for better resource management)
 def cleanup_old_sessions():
     import time
     current_time = time.time()
     expired_sessions = []
-    for upload_id, session in _multipart_sessions.items():
-        created_at = session.get('created_at', current_time)
-        if current_time - created_at > 3600:  # 1 hour
-            expired_sessions.append(upload_id)
+    
+    with _multipart_sessions_lock:
+        for upload_id, session in _multipart_sessions.items():
+            created_at = session.get('created_at', current_time)
+            if current_time - created_at > 1800:  # 30 minutes
+                expired_sessions.append(upload_id)
     
     for upload_id in expired_sessions:
         try:
             import os
-            tmp_path = _multipart_sessions[upload_id].get('tmp_path')
+            with _multipart_sessions_lock:
+                session = _multipart_sessions.get(upload_id)
+                if not session:
+                    continue
+                tmp_path = session.get('tmp_path')
+                _multipart_sessions.pop(upload_id, None)
+            
             if tmp_path and os.path.exists(tmp_path):
                 os.remove(tmp_path)
-        except Exception:
-            pass
-        finally:
-            _multipart_sessions.pop(upload_id, None)
+                log = logging.getLogger("upload")
+                log.info(f"Cleaned up expired session {upload_id}, removed temp file: {tmp_path}")
+        except Exception as e:
+            log = logging.getLogger("upload")
+            log.warning(f"Failed to cleanup temp file for session {upload_id}: {e}")
 
 
 @router.post("/multipart/init")
@@ -92,15 +145,17 @@ async def multipart_init(
         # Ensure empty file
         with open(tmp_path, "wb") as f:
             pass
-        _multipart_sessions[upload_id] = {
-            "file_id": obj.id,
-            "tmp_path": tmp_path,
-            "filename": filename,
-            "content_type": content_type,
-            "received_bytes": 0,
-            "total_size": total_size,
-            "created_at": time.time(),
-        }
+        
+        with _multipart_sessions_lock:
+            _multipart_sessions[upload_id] = {
+                "file_id": obj.id,
+                "tmp_path": tmp_path,
+                "filename": filename,
+                "content_type": content_type,
+                "received_bytes": 0,
+                "total_size": total_size,
+                "created_at": time.time(),
+            }
         return {"upload_id": upload_id, "file_id": obj.id}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Init failed: {e}")
@@ -118,14 +173,19 @@ async def multipart_part(
     """Append a chunk to the temporary file for this upload session.
     Order is preserved by the client; server appends in the order received.
     """
-    sess = _multipart_sessions.get(upload_id)
-    if not sess:
-        raise HTTPException(status_code=404, detail="Upload session not found")
+    with _multipart_sessions_lock:
+        sess = _multipart_sessions.get(upload_id)
+        if not sess:
+            raise HTTPException(status_code=404, detail="Upload session not found")
+    
     try:
         # Append bytes to tmp file
         with open(sess["tmp_path"], "ab") as f:
             f.write(body)
-        sess["received_bytes"] = int(sess.get("received_bytes", 0)) + len(body)
+        
+        with _multipart_sessions_lock:
+            sess["received_bytes"] = int(sess.get("received_bytes", 0)) + len(body)
+        
         return {
             "upload_id": upload_id,
             "part_number": part_number,
@@ -150,10 +210,13 @@ async def multipart_complete(
     # Cleanup old sessions first
     cleanup_old_sessions()
     
-    sess = _multipart_sessions.get(upload_id)
-    if not sess:
-        # Try to find the file by upload_id pattern or provide better error
-        raise HTTPException(status_code=404, detail=f"Upload session not found. Session may have expired. Please try uploading again.")
+    with _multipart_sessions_lock:
+        sess = _multipart_sessions.get(upload_id)
+        if not sess:
+            # Try to find the file by upload_id pattern or provide better error
+            raise HTTPException(status_code=404, detail=f"Upload session not found. Session may have expired. Please try uploading again.")
+    
+    log = logging.getLogger("upload")
     
     try:
         file_id = sess["file_id"]
@@ -164,131 +227,66 @@ async def multipart_complete(
         if not obj:
             raise HTTPException(status_code=404, detail="File not found")
         
-        # Read content from temp file efficiently
-        try:
-            import os
-            size_bytes = os.path.getsize(tmp_path)
-            # For large files, don't read the entire content into memory
-            # Just update the file record and let background processing handle the actual content
-            if size_bytes > 100 * 1024 * 1024:  # 100MB threshold for very large files
-                # For very large files, skip immediate Supabase upload and process directly
-                obj.storage_path = None
-                obj.size_bytes = size_bytes
-                obj.status = "processing"
-                db.add(obj)
-                db.commit()
-                db.refresh(obj)
-                
-                # Start processing with file path instead of content
-                try:
-                    import threading
-                    threading.Thread(target=process_file_from_path, args=(obj.id, tmp_path, filename), daemon=True).start()
-                except Exception as thread_err:
-                    log = logging.getLogger("upload")
-                    log.warning("Thread start failed in multipart complete large file: %s", thread_err)
-                
-                # Clean up session after successful processing start
-                _multipart_sessions.pop(upload_id, None)
-                
-                return {"file_id": file_id, "status": "processing", "size_bytes": obj.size_bytes}
-            else:
-                # For smaller files, read content and proceed normally
-                with open(tmp_path, "rb") as f:
-                    content = f.read()
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Read temp failed: {e}")
-
-        path = f"files/{obj.id}/{filename}"
+        # Get file size efficiently
+        import os
+        size_bytes = os.path.getsize(tmp_path)
+        log.info(f"Completing multipart upload for {filename}, size: {size_bytes / (1024*1024):.1f}MB")
         
-        # Upload to Supabase Storage (same as original upload)
-        if settings.SUPABASE_STORAGE_BUCKET and settings.SUPABASE_URL and settings.SUPABASE_SERVICE_ROLE_KEY:
-            try:
-                log = logging.getLogger("upload")
-                log.info(f"Uploading {filename} to Supabase storage...")
-                
-                # Upload to Supabase storage
-                client = get_supabase()
-                result = client.storage.from_(settings.SUPABASE_STORAGE_BUCKET).upload(
-                    path=path,
-                    file=content,
-                    file_options={"content-type": content_type}
-                )
-                
-                if result.get('error'):
-                    log.warning(f"Supabase upload failed: {result['error']}")
-                    obj.storage_path = None
-                else:
-                    log.info(f"Successfully uploaded to Supabase: {path}")
-                    obj.storage_path = path
-                
-                obj.size_bytes = size_bytes
-                obj.status = "processing"
-                db.add(obj)
-                db.commit()
-                db.refresh(obj)
-                
-                # Start processing with content directly
-                try:
-                    import threading
-                    threading.Thread(target=process_file, args=(obj.id, content, filename), daemon=True).start()
-                except Exception as thread_err:
-                    log.warning("Thread start failed in multipart complete: %s", thread_err)
-                
-                # Clean up session after successful processing start
-                _multipart_sessions.pop(upload_id, None)
-                
-                return {"file_id": file_id, "status": "processing", "size_bytes": obj.size_bytes}
-            except Exception as storage_error:
-                # Fallback: process directly with in-memory content
-                log = logging.getLogger("upload")
-                log.warning("Supabase upload failed in multipart, falling back to direct ingestion: %s", storage_error)
-                obj.storage_path = None
-                obj.size_bytes = size_bytes
-                obj.status = "processing"
-                db.add(obj)
-                db.commit()
-                db.refresh(obj)
-                # Start processing with content directly
-                try:
-                    import threading
-                    threading.Thread(target=process_file, args=(obj.id, content, filename), daemon=True).start()
-                except Exception as thread_err:
-                    log.warning("Thread start failed in multipart complete fallback: %s", thread_err)
-                
-                # Clean up session after successful processing start
-                _multipart_sessions.pop(upload_id, None)
-                
-                return {"file_id": file_id, "status": "processing", "size_bytes": obj.size_bytes}
-        else:
-            # No Supabase config, process directly
-            obj.storage_path = None
-            obj.size_bytes = size_bytes
-            obj.status = "processing"
+        # For all files, use file path processing to avoid memory issues
+        # This is more efficient and handles large files better
+        obj.storage_path = None  # Skip Supabase for now to avoid timeouts
+        obj.size_bytes = size_bytes
+        obj.status = "processing"
+        db.add(obj)
+        db.commit()
+        db.refresh(obj)
+        
+        # Start processing with file path instead of content
+        # This is much more memory efficient for large files
+        try:
+            import threading
+            thread = threading.Thread(
+                target=process_file_from_path, 
+                args=(obj.id, tmp_path, filename), 
+                daemon=True,
+                name=f"file-processor-{obj.id}"
+            )
+            thread.start()
+            log.info(f"Started background processing thread for file {obj.id}")
+        except Exception as thread_err:
+            log.error(f"Thread start failed in multipart complete: {thread_err}")
+            # Fallback: mark as failed
+            obj.status = "failed"
             db.add(obj)
             db.commit()
-            db.refresh(obj)
-            # Start processing with content directly
-            try:
-                import threading
-                threading.Thread(target=process_file, args=(obj.id, content, filename), daemon=True).start()
-            except Exception as thread_err:
-                log = logging.getLogger("upload")
-                log.warning("Thread start failed in multipart complete no-supabase: %s", thread_err)
-            
-            # Clean up session after successful processing start
+            raise HTTPException(status_code=500, detail=f"Failed to start processing: {thread_err}")
+        
+        # Clean up session after successful processing start
+        with _multipart_sessions_lock:
             _multipart_sessions.pop(upload_id, None)
-            
-            return {"file_id": file_id, "status": "processing", "size_bytes": obj.size_bytes}
-
-        # Cleanup temp file
-        try:
-            import os
-            os.remove(tmp_path)
-        except Exception:
-            pass
+        
+        # Cleanup temp file in background (don't block response)
+        def cleanup_temp_file():
+            try:
+                import time
+                time.sleep(5)  # Give processing a head start
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+                    log.info(f"Cleaned up temp file: {tmp_path}")
+            except Exception as e:
+                log.warning(f"Failed to cleanup temp file {tmp_path}: {e}")
+        
+        threading.Thread(target=cleanup_temp_file, daemon=True).start()
+        
+        return {"file_id": file_id, "status": "processing", "size_bytes": obj.size_bytes}
+        
     except HTTPException:
         raise
     except Exception as e:
+        log.error(f"Multipart complete failed for upload {upload_id}: {e}")
+        # Clean up session on error
+        with _multipart_sessions_lock:
+            _multipart_sessions.pop(upload_id, None)
         raise HTTPException(status_code=500, detail=f"Complete failed: {e}")
 
 @router.post("/{file_id}/cancel")
@@ -372,44 +370,27 @@ async def get_file_rows(
 @router.post("", response_model=FileRead)
 async def upload_file_unified(background: BackgroundTasks, file: UploadFile = File(...), db: Session = Depends(get_db), user=Depends(get_current_user)):
     """
-    Unified upload endpoint that handles ALL file sizes intelligently (0.1MB to 500MB+).
+    UNIFIED CHUNK-BASED upload endpoint that handles ALL file sizes (1MB to 500MB) efficiently.
     
-    File Size Routing:
-    - 0.1MB - 5MB: Direct upload (fast, simple)
-    - 5MB - 100MB: Chunked upload with 20MB chunks (balanced)
-    - 100MB - 500MB+: Optimized chunked upload with larger chunks
+    This endpoint:
+    1. Uses streaming upload to avoid memory issues
+    2. Creates temporary file for processing
+    3. Processes all files using the same efficient pipeline
+    4. Handles 100M+ rows with optimized batch processing
     """
     log = logging.getLogger("upload")
+    import tempfile
+    import os
+    
     try:
-        # Read file content
-        content = await file.read()
-        if not content:
-            raise ValueError("empty file body")
-        
-        file_size = len(content)
-        log.info(f"Unified upload: {file.filename}, size: {file_size / (1024*1024):.1f}MB")
-        
-        # Intelligent file size routing (adjusted for Excel compression)
-        if file_size >= 2 * 1024 * 1024:  # 2MB threshold for Excel files
-            # Determine optimal chunk size based on file size (adjusted for Excel compression)
-            if file_size >= 10 * 1024 * 1024:  # 10MB+ (very large for Excel)
-                chunk_size = 50 * 1024 * 1024  # 50MB chunks for very large files
-                log.info(f"Very large file detected ({file_size / (1024*1024):.1f}MB), using 50MB chunks")
-            else:
-                chunk_size = 20 * 1024 * 1024  # 20MB chunks for medium files
-                log.info(f"Large file detected ({file_size / (1024*1024):.1f}MB), using 20MB chunks")
-            
-            return {
-                "requires_chunked_upload": True,
-                "message": f"File is large ({file_size / (1024*1024):.1f}MB) and requires chunked upload",
-                "max_chunk_size": chunk_size,
-                "file_size": file_size,
-                "estimated_chunks": (file_size + chunk_size - 1) // chunk_size,
-                "instructions": "Use /multipart/init, /multipart/part, /multipart/complete endpoints"
-            }
-        
-        # For smaller files (0.1MB - 5MB), process directly
-        log.info(f"Processing file directly: {file.filename}, size: {file_size / (1024*1024):.1f}MB")
+        # Get file size first (if available)
+        file_size = 0
+        if hasattr(file, 'size') and file.size:
+            file_size = file.size
+            file_size_mb = file_size / (1024 * 1024)
+            log.info(f"Unified upload: {file.filename}, size: {file_size_mb:.1f}MB")
+        else:
+            log.info(f"Unified upload: {file.filename}, size: unknown")
         
         # Create file record
         obj = FileModel(
@@ -421,15 +402,47 @@ async def upload_file_unified(background: BackgroundTasks, file: UploadFile = Fi
         db.add(obj)
         db.commit()
         db.refresh(obj)
-
-        # Process file directly (no Supabase upload to avoid timeouts)
+        
+        # Create temporary file for streaming processing
+        with tempfile.NamedTemporaryFile(delete=False, suffix=f"_{file.filename}") as tmp_file:
+            tmp_path = tmp_file.name
+            
+            # Stream file content to temporary file
+            total_bytes = 0
+            while chunk := await file.read(8192):  # 8KB chunks
+                tmp_file.write(chunk)
+                total_bytes += len(chunk)
+            
+            # Update file size if not known initially
+            if file_size == 0:
+                obj.size_bytes = total_bytes
+                db.add(obj)
+                db.commit()
+                log.info(f"Updated file size: {total_bytes / (1024*1024):.1f}MB")
+        
+        # Process file using the efficient pipeline
         try:
             import threading
-            threading.Thread(target=process_file, args=(obj.id, content, file.filename), daemon=True).start()
-            log.info(f"Started background processing for file {obj.id}")
+            thread = threading.Thread(
+                target=process_file_from_path, 
+                args=(obj.id, tmp_path, file.filename), 
+                daemon=True,
+                name=f"file-processor-{obj.id}"
+            )
+            thread.start()
+            log.info(f"Started background processing thread for file {obj.id}")
         except Exception as thread_err:
-            log.warning("Thread start failed, falling back to BackgroundTasks: %s", thread_err)
-            background.add_task(process_file, obj.id, content, file.filename)
+            log.error(f"Thread start failed in unified upload: {thread_err}")
+            # Cleanup temp file
+            try:
+                os.unlink(tmp_path)
+            except:
+                pass
+            # Mark as failed
+            obj.status = "failed"
+            db.add(obj)
+            db.commit()
+            raise HTTPException(status_code=500, detail=f"Failed to start processing: {thread_err}")
         
         return FileRead.from_orm(obj)
     except Exception as e:
@@ -611,6 +624,114 @@ async def get_elasticsearch_status(file_id: int, db: Session = Depends(get_db), 
     except Exception as e:
         log.error(f"Failed to get Elasticsearch status for file {file_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get Elasticsearch status: {e}")
+
+
+@router.get("/{file_id}/upload-progress")
+async def get_upload_progress(file_id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    """
+    Get detailed upload progress for a file
+    """
+    log = logging.getLogger("upload")
+    try:
+        file_obj = db.query(FileModel).filter(FileModel.id == file_id).first()
+        if not file_obj:
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        # Check if file is in multipart session
+        with _multipart_sessions_lock:
+            active_sessions = [session for session in _multipart_sessions.values() if session.get('file_id') == file_id]
+            active_session = active_sessions[0] if active_sessions else None
+        
+        progress_data = {
+            "file_id": file_id,
+            "filename": file_obj.filename,
+            "status": file_obj.status,
+            "size_bytes": file_obj.size_bytes,
+            "rows_count": file_obj.rows_count,
+            "upload_progress": 0,
+            "is_uploading": False,
+            "received_bytes": 0,
+            "total_size": 0,
+            "elasticsearch_synced": file_obj.elasticsearch_synced,
+            "elasticsearch_sync_error": file_obj.elasticsearch_sync_error,
+            "websocket_connections": websocket_manager.get_connection_count(str(file_id))
+        }
+        
+        if active_session:
+            progress_data.update({
+                "is_uploading": True,
+                "received_bytes": active_session.get('received_bytes', 0),
+                "total_size": active_session.get('total_size', 0),
+                "upload_progress": min(100, int((active_session.get('received_bytes', 0) / max(1, active_session.get('total_size', 1))) * 100))
+            })
+        
+        return progress_data
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error(f"Failed to get upload progress for file {file_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get upload progress: {e}")
+
+
+@router.get("/system/health")
+async def get_system_health(db: Session = Depends(get_db), user=Depends(get_current_user)):
+    """
+    Get comprehensive system health status
+    """
+    log = logging.getLogger("upload")
+    try:
+        # Database health
+        db_health = {"status": "healthy", "connections": 0}
+        try:
+            result = db.execute(text("SELECT COUNT(*) FROM file")).scalar()
+            db_health["file_count"] = result
+        except Exception as e:
+            db_health = {"status": "unhealthy", "error": str(e)}
+        
+        # Session health
+        with _multipart_sessions_lock:
+            session_count = len(_multipart_sessions)
+            active_sessions = list(_multipart_sessions.values())
+        
+        # WebSocket health
+        ws_health = {
+            "total_connections": websocket_manager.get_total_connections(),
+            "active_files": len(websocket_manager.active_connections)
+        }
+        
+        # Memory usage (approximate)
+        import psutil
+        memory_info = {
+            "memory_percent": psutil.virtual_memory().percent,
+            "available_mb": psutil.virtual_memory().available // (1024 * 1024)
+        }
+        
+        return {
+            "timestamp": time.time(),
+            "database": db_health,
+            "sessions": {
+                "active_upload_sessions": session_count,
+                "sessions": [
+                    {
+                        "upload_id": upload_id,
+                        "file_id": session.get('file_id'),
+                        "filename": session.get('filename'),
+                        "received_bytes": session.get('received_bytes', 0),
+                        "total_size": session.get('total_size', 0),
+                        "created_at": session.get('created_at', 0)
+                    }
+                    for upload_id, session in _multipart_sessions.items()
+                ]
+            },
+            "websockets": ws_health,
+            "memory": memory_info,
+            "overall_status": "healthy" if db_health["status"] == "healthy" else "degraded"
+        }
+        
+    except Exception as e:
+        log.error(f"Failed to get system health: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get system health: {e}")
 
 
 @router.post("/{file_id}/elasticsearch-retry")

@@ -10,10 +10,13 @@ DATABASE_URL = settings.DATABASE_URL or "postgresql+psycopg://postgres:postgres@
 engine = create_engine(
     DATABASE_URL, 
     pool_pre_ping=True, 
-    pool_size=20,  # Increased pool size
-    max_overflow=30,  # More overflow connections
-    pool_timeout=30,  # Connection timeout
-    pool_recycle=3600,  # Recycle connections every hour
+    pool_size=1,  # Minimal pool size for Supabase
+    max_overflow=2,  # Very limited overflow connections
+    pool_timeout=30,  # Shorter timeout
+    pool_recycle=1800,  # Recycle connections every 30 minutes
+    connect_args={
+        "connect_timeout": 30,  # Shorter connection timeout
+    },
     echo=False  # Disable SQL logging for performance
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
