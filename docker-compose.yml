@@ -9,7 +9,7 @@ services:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: excel_ai
     ports:
-      - "5432:5432"
+      - "5433:5432"  # map container 5432 to host 5433 to avoid local conflicts
     volumes:
       - pgdata:/var/lib/postgresql/data
 

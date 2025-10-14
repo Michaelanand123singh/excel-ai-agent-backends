@@ -449,6 +449,48 @@ async def test_upload(background: BackgroundTasks, db: Session = Depends(get_db)
     )
 
 
+@router.post("/test-upload", response_model=FileRead)
+async def test_upload_with_file(background: BackgroundTasks, file: UploadFile = File(...), db: Session = Depends(get_db)):
+    """
+    Test upload endpoint that doesn't require authentication.
+    Use this for testing upload functionality without auth.
+    """
+    log = logging.getLogger("upload")
+    try:
+        # Read file content
+        content = await file.read()
+        if not content:
+            raise ValueError("empty file body")
+        
+        file_size = len(content)
+        log.info(f"Test upload: {file.filename}, size: {file_size / (1024*1024):.1f}MB")
+        
+        # Create file record
+        obj = FileModel(
+            filename=file.filename,
+            size_bytes=file_size,
+            content_type=file.content_type or "application/octet-stream",
+            status="processing"
+        )
+        db.add(obj)
+        db.commit()
+        db.refresh(obj)
+
+        # Process file directly
+        try:
+            import threading
+            threading.Thread(target=process_file, args=(obj.id, content, file.filename), daemon=True).start()
+            log.info(f"Started background processing for test file {obj.id}")
+        except Exception as thread_err:
+            log.warning("Thread start failed, falling back to BackgroundTasks: %s", thread_err)
+            background.add_task(process_file, obj.id, content, file.filename)
+        
+        return FileRead.from_orm(obj)
+    except Exception as e:
+        log.error("Test upload failed for filename=%s content_type=%s: %s", getattr(file, "filename", None), getattr(file, "content_type", None), e)
+        raise HTTPException(status_code=500, detail=f"Test upload failed: {e}")
+
+
 @router.get("/", response_model=list[FileRead])
 async def list_files(db: Session = Depends(get_db), user=Depends(get_current_user)):
     """List all uploaded files."""
